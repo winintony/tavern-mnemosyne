@@ -3,6 +3,10 @@
   gap: 10px;
 }
 
+#tavern_mnemosyne_settings [hidden] {
+  display: none !important;
+}
+
 #tavern_mnemosyne_settings .mnemosyne-setting-row {
   align-items: center;
   display: grid;
@@ -40,12 +44,9 @@
   width: 100%;
 }
 
-#tavern_mnemosyne_settings .mnemosyne-icon-button {
-  align-items: center;
-  display: inline-flex;
-  height: 32px;
-  justify-content: center;
-  width: 32px;
+#tavern_mnemosyne_settings .mnemosyne-status-row .menu_button {
+  min-width: 0;
+  width: auto;
 }
 
 #tavern_mnemosyne_settings .mnemosyne-provisioning-panel,
@@ -154,40 +155,19 @@
   padding-top: 10px;
 }
 
-#tavern_mnemosyne_settings .mnemosyne-feedback-panel small {
-  opacity: 0.75;
+#tavern_mnemosyne_settings .mnemosyne-feedback-panel > summary {
+  cursor: pointer;
 }
 
-#tavern_mnemosyne_settings .mnemosyne-feedback-actions,
-#tavern_mnemosyne_settings .mnemosyne-feedback-answers {
+#tavern_mnemosyne_settings .mnemosyne-feedback-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
 }
 
-#tavern_mnemosyne_settings .mnemosyne-feedback-actions .menu_button,
-#tavern_mnemosyne_settings .mnemosyne-feedback-answers .menu_button {
+#tavern_mnemosyne_settings .mnemosyne-feedback-actions .menu_button {
   min-width: 0;
   width: auto;
-}
-
-#tavern_mnemosyne_settings .mnemosyne-feedback-question {
-  display: grid;
-  gap: 6px;
-}
-
-#tavern_mnemosyne_settings .mnemosyne-feedback-facet {
-  display: grid;
-  gap: 4px;
-}
-
-#tavern_mnemosyne_settings .mnemosyne-feedback-facet select {
-  min-width: 0;
-  width: 100%;
-}
-
-#tavern_mnemosyne_settings .mnemosyne-feedback-question[hidden] {
-  display: none;
 }
 
 #tavern_mnemosyne_settings .mnemosyne-feedback-status {
@@ -196,6 +176,142 @@
 
 #tavern_mnemosyne_settings .mnemosyne-feedback-status[data-kind="error"] {
   color: var(--warning);
+}
+
+/* Floating micro-window for per-reply feedback */
+
+.mnemosyne-feedback-float {
+  bottom: 76px;
+  display: grid;
+  justify-items: end;
+  max-width: min(320px, calc(100vw - 24px));
+  position: fixed;
+  right: 12px;
+  z-index: 3000;
+}
+
+.mnemosyne-feedback-float[hidden] {
+  display: none;
+}
+
+.mnemosyne-feedback-pill {
+  background: var(--SmartThemeBlurTintColor, rgb(0 0 0 / 70%));
+  border: 1px solid rgb(255 255 255 / 15%);
+  border-radius: 999px;
+  color: var(--SmartThemeBodyColor, #ddd);
+  cursor: pointer;
+  font-size: 0.85em;
+  opacity: 0.85;
+  padding: 5px 12px;
+}
+
+.mnemosyne-feedback-pill:hover {
+  opacity: 1;
+}
+
+.mnemosyne-feedback-pill[hidden] {
+  display: none;
+}
+
+.mnemosyne-feedback-card {
+  background: var(--SmartThemeBlurTintColor, rgb(0 0 0 / 85%));
+  border: 1px solid rgb(255 255 255 / 15%);
+  border-radius: 10px;
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  width: 100%;
+}
+
+.mnemosyne-feedback-card[hidden] {
+  display: none;
+}
+
+.mnemosyne-feedback-card-header {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.mnemosyne-feedback-close {
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  font-size: 1.1em;
+  line-height: 1;
+  opacity: 0.7;
+  padding: 0 2px;
+}
+
+.mnemosyne-feedback-close:hover {
+  opacity: 1;
+}
+
+.mnemosyne-feedback-answers,
+.mnemosyne-feedback-facets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.mnemosyne-feedback-choice {
+  background: rgb(255 255 255 / 6%);
+  border: 1px solid rgb(255 255 255 / 15%);
+  border-radius: 999px;
+  color: inherit;
+  cursor: pointer;
+  font-size: 0.85em;
+  padding: 3px 10px;
+}
+
+.mnemosyne-feedback-choice.selected {
+  background: var(--SmartThemeQuoteColor, #7aa2f7);
+  border-color: transparent;
+  color: var(--SmartThemeBlurTintColor, #111);
+}
+
+.mnemosyne-feedback-facets-block {
+  display: grid;
+  gap: 5px;
+}
+
+.mnemosyne-feedback-facets-block[hidden] {
+  display: none;
+}
+
+.mnemosyne-feedback-facet-prompt {
+  font-size: 0.85em;
+  opacity: 0.75;
+}
+
+.mnemosyne-feedback-note {
+  background: rgb(255 255 255 / 5%);
+  border: 1px solid rgb(255 255 255 / 12%);
+  border-radius: 6px;
+  color: inherit;
+  font-size: 0.85em;
+  padding: 5px 8px;
+  resize: vertical;
+}
+
+.mnemosyne-feedback-card-footer {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.mnemosyne-feedback-card-footer .menu_button {
+  min-width: 0;
+  width: auto;
+}
+
+.mnemosyne-feedback-float-status {
+  color: var(--warning);
+  font-size: 0.8em;
+  overflow-wrap: anywhere;
 }
 
 #tavern_mnemosyne_settings .mnemosyne-activity-panel {

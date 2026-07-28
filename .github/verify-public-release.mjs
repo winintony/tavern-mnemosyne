@@ -156,6 +156,25 @@ export async function auditPublicRelease(root) {
       throw new Error(`Private workspace content found in ${relative}.`);
     }
   }
+  const packagePath = 'tavern-mnemosyne/package.json';
+  const lockPath = 'tavern-mnemosyne/package-lock.json';
+  if (fileSet.has(packagePath) && fileSet.has(lockPath)) {
+    const [packageJson, packageLock] = await Promise.all([
+      readFile(path.join(resolvedRoot, packagePath), 'utf8')
+        .then(JSON.parse),
+      readFile(path.join(resolvedRoot, lockPath), 'utf8')
+        .then(JSON.parse),
+    ]);
+    const lockedRoot = packageLock?.packages?.['']?.version;
+    if (
+      packageJson.version !== packageLock.version
+      || packageJson.version !== lockedRoot
+    ) {
+      throw new Error(
+        'Published package.json and package-lock.json versions differ.',
+      );
+    }
+  }
   return Object.freeze({ files: Object.freeze(files) });
 }
 

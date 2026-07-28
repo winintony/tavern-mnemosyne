@@ -509,6 +509,31 @@ export function createBrowserFolderRuntimeConfig({
     });
 }
 
+export async function readInstalledBrowserFolderRuntimeConfig(rootHandle) {
+    let source;
+    try {
+        source = await readFileText(
+            rootHandle,
+            BROWSER_FOLDER_PATHS.runtimeConfig,
+        );
+    } catch (error) {
+        if (error?.name === 'NotFoundError') return null;
+        throw error;
+    }
+    const parsed = parseJson(
+        source,
+        'browser_folder_runtime_config_invalid',
+        'The installed Mnemosyne runtime config',
+    );
+    return createBrowserFolderRuntimeConfig({
+        upstreamBaseUrl: parsed.upstreamBaseUrl,
+        upstreamModel: parsed.upstreamModel,
+        providerContextTokens: parsed.providerContextTokens,
+        providerOutputReserveTokens:
+            parsed.providerOutputReserveTokens,
+    });
+}
+
 async function validateSelectedRoot({
     rootHandle,
     hostVersion,

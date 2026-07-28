@@ -193,6 +193,42 @@ function isExplicitLocalPage(pageUrl, deploymentMode) {
   return deploymentMode === 'local' && LOOPBACK_HOSTS.has(pageUrl.hostname);
 }
 
+async function fetchWithDeadline(
+  fetchImpl,
+  url,
+  options,
+  {
+    signal,
+    timeoutMs,
+  },
+) {
+  const controller = new AbortController();
+  const forwardAbort = () => controller.abort(signal?.reason);
+  if (signal?.aborted) forwardAbort();
+  else signal?.addEventListener('abort', forwardAbort, { once: true });
+  let timeoutId;
+  const timeout = new Promise((resolve, reject) => {
+    timeoutId = setTimeout(() => {
+      controller.abort();
+      const error = new Error('Transport resolution timed out.');
+      error.name = 'TimeoutError';
+      reject(error);
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([
+      fetchImpl(url, {
+        ...options,
+        signal: controller.signal,
+      }),
+      timeout,
+    ]);
+  } finally {
+    clearTimeout(timeoutId);
+    signal?.removeEventListener('abort', forwardAbort);
+  }
+}
+
 async function sha256Hex(value) {
   const bytes = new TextEncoder().encode(value);
   const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
@@ -237,6 +273,7 @@ export function createMnemosyneControlClient({
   getLoopbackHeaders = () => ({}),
   fetchImpl = globalThis.fetch,
   now = () => new Date(),
+  transportResolveTimeoutMs = 3_000,
 } = {}) {
   const resolvedPageUrl = new URL(pageUrl);
   const bridgeCapabilitiesUrl = new URL(
@@ -248,20 +285,32 @@ export function createMnemosyneControlClient({
   if (!LOOPBACK_HOSTS.has(resolvedLoopbackUrl.hostname)) {
     throw new Error('Loopback transport requires a loopback URL.');
   }
+  if (
+    !Number.isSafeInteger(transportResolveTimeoutMs)
+    || transportResolveTimeoutMs <= 0
+  ) {
+    throw new Error(
+      'Transport resolution timeout must be a positive integer.',
+    );
+  }
 
   async function resolveRootTransport({ signal } = {}) {
     const auth = normalizeHostAuthContext(getHostAuthContext?.());
     let bridgeResponse;
     try {
-      bridgeResponse = await fetchImpl(bridgeCapabilitiesUrl, {
-        method: 'GET',
-        headers: mergeRequestHeaders(auth.headers, {
-          accept: 'application/json',
-        }),
-        credentials: auth.credentials,
-        cache: 'no-store',
-        signal,
-      });
+      bridgeResponse = await fetchWithDeadline(
+        fetchImpl,
+        bridgeCapabilitiesUrl,
+        {
+          method: 'GET',
+          headers: mergeRequestHeaders(auth.headers, {
+            accept: 'application/json',
+          }),
+          credentials: auth.credentials,
+          cache: 'no-store',
+        },
+        { signal, timeoutMs: transportResolveTimeoutMs },
+      );
     } catch (error) {
       fail(
         'mnemosyne_bridge_unreachable',
@@ -291,18 +340,28 @@ export function createMnemosyneControlClient({
       );
     }
 
-    const loopbackResponse = await fetchImpl(
-      new URL('/health', resolvedLoopbackUrl),
-      {
-        method: 'GET',
-        headers: {
-          accept: 'application/json',
-          ...getLoopbackHeaders(),
+    let loopbackResponse;
+    try {
+      loopbackResponse = await fetchWithDeadline(
+        fetchImpl,
+        new URL('/health', resolvedLoopbackUrl),
+        {
+          method: 'GET',
+          headers: {
+            accept: 'application/json',
+            ...getLoopbackHeaders(),
+          },
+          cache: 'no-store',
         },
-        cache: 'no-store',
-        signal,
-      },
-    );
+        { signal, timeoutMs: transportResolveTimeoutMs },
+      );
+    } catch (error) {
+      fail(
+        'mnemosyne_loopback_unavailable',
+        'The local Mnemosyne runtime is unavailable.',
+        { cause: error?.name ?? 'unknown' },
+      );
+    }
     if (!loopbackResponse.ok) {
       fail(
         'mnemosyne_loopback_unavailable',

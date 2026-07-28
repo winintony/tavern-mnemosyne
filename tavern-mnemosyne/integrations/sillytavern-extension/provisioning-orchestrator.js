@@ -143,7 +143,7 @@ export function createProvisioningOrchestrator({
                 );
             }
         }
-        const input = await loadBrowserFolderInput();
+        const input = await loadBrowserFolderInput({ rootHandle });
         const receipt = await provisionBrowserFolder({
             rootHandle,
             ...input,

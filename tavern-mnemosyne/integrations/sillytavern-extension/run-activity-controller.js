@@ -8,7 +8,7 @@ const ENTRY_SCHEMA = 'mnemosyne.user-visible-run-activity.v1';
 const STATUS_LABELS = Object.freeze({
   running: '运行中',
   body_committed: '回复已生成',
-  applying_writeback: '正在更新记忆',
+  applying_writeback: '正在写回',
   partial_success: '部分完成',
   completed: '已完成',
   failed: '未完成',
@@ -394,7 +394,7 @@ function initialState() {
     loading: false,
     chatId: null,
     entries: [],
-    status: '尚未查看每轮记忆活动。',
+    status: '尚未查看。',
     statusKind: 'idle',
   };
 }
@@ -469,7 +469,7 @@ export function createRunActivityController({
       if (state.chatId !== chatId) state.entries = [];
       state.chatId = chatId;
       state.loading = true;
-      state.status = '正在读取每轮记忆活动…';
+      state.status = '正在读取…';
       state.statusKind = 'idle';
       revision = ++requestRevision;
       notify();
@@ -487,8 +487,8 @@ export function createRunActivityController({
       state.entries = validated.entries;
       state.loading = false;
       state.status = state.entries.length === 0
-        ? '当前聊天还没有可显示的记忆活动。'
-        : `已读取 ${state.entries.length} 轮记忆活动。`;
+        ? '当前聊天还没有可显示的活动。'
+        : `已读取 ${state.entries.length} 轮活动。`;
       state.statusKind = 'success';
       notify();
       return { ok: true, status: 'ready' };
@@ -500,11 +500,11 @@ export function createRunActivityController({
         return { ok: false, reason_code: 'run_activity_request_stale' };
       }
       state.loading = false;
-      state.status =
-        `记忆活动暂时不可用：${
-          error?.reasonCode
-          ?? 'run_activity_failed'
-        }`;
+      console.warn(
+        '[Mnemosyne] run activity unavailable:',
+        error?.reasonCode ?? 'run_activity_failed',
+      );
+      state.status = '每轮活动暂时不可用，请稍后重试。';
       state.statusKind = 'error';
       notify();
       return {

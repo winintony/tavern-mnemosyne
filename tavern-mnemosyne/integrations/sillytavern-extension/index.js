@@ -109,6 +109,18 @@ import {
     createHistoryLifecycleDurableStore,
 } from './history-lifecycle-durable-store.js';
 import {
+    resolveProvisioningUpstreamUrl,
+} from './provisioning-upstream-url.js';
+import {
+    createAutoIntakeScheduler,
+} from './auto-intake-scheduler.js';
+import {
+    appendSubjectiveFeedbackNote,
+    bindSubjectiveFeedbackNote,
+    removeSubjectiveFeedbackNotes,
+    SUBJECTIVE_FEEDBACK_NOTE_LIMIT,
+} from './subjective-feedback-notes.js';
+import {
     buildSourceRemovalRunScope,
     resolveSourceRemovalGrantEvidence,
 } from './source-removal-grant-response.js';
@@ -136,6 +148,7 @@ import {
 import {
     createBrowserFolderRuntimeConfig,
     localRuntimeProxyUrl,
+    readInstalledBrowserFolderRuntimeConfig,
 } from './browser-folder-provisioning.js';
 import {
     createProvisioningOrchestrator,
@@ -155,6 +168,10 @@ const DEFAULT_SETTINGS = Object.freeze({
     sessionToken: '',
     realUseFeedbackEnabled: false,
     provisioningPending: false,
+    // The user's real Custom OpenAI endpoint, captured before provisioning
+    // rewrites custom_url to the local runtime. Re-provisioning must read
+    // this snapshot, never the (possibly loopback) live custom_url.
+    upstreamCustomUrl: '',
 });
 
 const state = {
@@ -303,10 +320,50 @@ async function invokeControl(methodName, payload, {
     });
 }
 
+const STATUS_DISPLAY_TEXT = Object.freeze({
+    'Ready': '已就绪',
+    'Disabled': '已关闭',
+    'Preparing': '准备中…',
+    'Checking': '检查中…',
+    'Unavailable': '运行时不可用',
+    'Dry check passed': '检查通过',
+    'Running dry check': '正在运行检查…',
+    'Running forwarding check': '正在检查转发…',
+    'Preparing intake': '正在准备设定导入…',
+    'Checking model deployment': '正在检查模型部署…',
+    'Static Lore sources or intake state changed':
+        '设定来源已变化，将重新导入。',
+    'Blocked: enable Mnemosyne': '请先开启 Mnemosyne。',
+    'Blocked: run dry check first': '请先运行一次检查。',
+});
+
+const BLOCK_REASON_TEXT = Object.freeze({
+    agent_proxy_unavailable: '运行时不可用',
+    chat_id_missing: '请先打开一个聊天',
+    character_missing: '请先打开角色聊天',
+    prompt_trace_missing: '提示词轨迹缺失',
+});
+
+// Raw status values stay in state for governance logic and contract
+// tests; only the rendered text is localized and stripped of reason
+// codes, which belong in the console, not the release UI.
+function statusDisplayText(value) {
+    const fixed = STATUS_DISPLAY_TEXT[value];
+    if (fixed) return fixed;
+    const blocked = /^Blocked: (.+)$/.exec(value);
+    if (blocked) {
+        const reason = BLOCK_REASON_TEXT[blocked[1]];
+        if (reason) return `已拦截：${reason}`;
+        console.warn('[Mnemosyne] blocked:', blocked[1]);
+        return '已拦截：内部检查未通过';
+    }
+    return value;
+}
+
 function updateStatus(value) {
     state.status = value;
     const element = document.querySelector('#tavern_mnemosyne_status');
-    if (element) element.textContent = value;
+    if (element) element.textContent = statusDisplayText(value);
 }
 
 function claimExclusiveOperation(operation) {
@@ -425,63 +482,300 @@ const runActivityController =
         onChange: activityState =>
             syncRunActivityUi(activityState),
     });
+const autoStaticLoreIntakeScheduler =
+    createAutoIntakeScheduler({
+        isEnabled: () => settings().enabled,
+        run: () => autoRunStaticLoreIntake(),
+    });
 
-function renderRealUseFeedbackQuestionnaire(
-    panel,
-    prepared,
-) {
+// Floating micro-window state: which verdict/facet is picked before
+// submit, and whether the card is collapsed back into the pill.
+const feedbackFloatState = {
+    collapsed: false,
+    caseId: null,
+    verdict: null,
+    facet: null,
+};
+
+function stageSubjectiveFeedbackNote({
+    chatId,
+    caseId,
+    verdict,
+    facet,
+    text,
+}) {
+    const context = getContext();
+    const metadata = context.chatMetadata;
+    const persist =
+        context.saveMetadataDebounced ?? context.saveMetadata;
+    if (!metadata || typeof persist !== 'function') {
+        throw new Error('Chat metadata cannot be saved.');
+    }
+    const note = appendSubjectiveFeedbackNote(metadata, {
+        chatId,
+        caseId,
+        verdict,
+        facet,
+        text,
+        createId: () => crypto.randomUUID(),
+        now: () => new Date().toISOString(),
+    });
+    persist();
+    return Object.freeze({
+        metadata,
+        noteId: note.note_id,
+        persist,
+    });
+}
+
+function setFeedbackLocalError(text) {
+    const floatStatus = document.querySelector(
+        '#tavern_mnemosyne_feedback_float_status',
+    );
+    if (floatStatus) floatStatus.textContent = text;
+    const panelStatus = document.querySelector(
+        '#tavern_mnemosyne_feedback_status',
+    );
+    if (panelStatus) {
+        panelStatus.textContent = text;
+        panelStatus.dataset.kind = 'error';
+    }
+}
+
+async function submitRealUseFeedbackFromFloat() {
+    const prepared =
+        realUseFeedbackController.snapshot().prepared;
+    const verdict = feedbackFloatState.verdict;
+    if (!prepared || !verdict) return;
+    const note = document.querySelector(
+        '#tavern_mnemosyne_feedback_note',
+    );
+    const noteText = note?.value.trim() ?? '';
+    const target = {
+        chatId: prepared.chatId,
+        caseId: prepared.caseId,
+        verdict,
+        facet: feedbackFloatState.facet,
+    };
+    let stagedNote = null;
+    if (noteText) {
+        try {
+            stagedNote = stageSubjectiveFeedbackNote({
+                ...target,
+                text: noteText,
+            });
+        } catch (error) {
+            console.warn(
+                '[Mnemosyne] subjective feedback note unavailable:',
+                error,
+            );
+            setFeedbackLocalError(
+                '主观备注未能保存，请保留文字并稍后重试。',
+            );
+            return;
+        }
+    }
+    const result = await realUseFeedbackController.submit({
+        quickAnswer: verdict,
+        facet: feedbackFloatState.facet,
+    });
+    if (!result.ok && stagedNote) {
+        removeSubjectiveFeedbackNotes(
+            stagedNote.metadata,
+            { noteId: stagedNote.noteId },
+        );
+        stagedNote.persist();
+    }
+    if (result.ok && stagedNote) {
+        bindSubjectiveFeedbackNote(
+            stagedNote.metadata,
+            stagedNote.noteId,
+            result.feedback?.feedback_id,
+        );
+        stagedNote.persist();
+    }
+    if (result.ok && note) note.value = '';
+}
+
+function ensureRealUseFeedbackFloat() {
+    let float = document.querySelector(
+        '#tavern_mnemosyne_feedback_float',
+    );
+    if (float) return float;
+    float = document.createElement('div');
+    float.id = 'tavern_mnemosyne_feedback_float';
+    float.className = 'mnemosyne-feedback-float';
+    float.hidden = true;
+    float.innerHTML = `
+        <button
+            id="tavern_mnemosyne_feedback_pill"
+            class="mnemosyne-feedback-pill"
+            type="button"
+        >评价这轮回复</button>
+        <div
+            id="tavern_mnemosyne_feedback_card"
+            class="mnemosyne-feedback-card"
+            hidden
+        >
+            <div class="mnemosyne-feedback-card-header">
+                <span id="tavern_mnemosyne_feedback_prompt"></span>
+                <button
+                    id="tavern_mnemosyne_feedback_close"
+                    class="mnemosyne-feedback-close"
+                    type="button"
+                    aria-label="收起"
+                >×</button>
+            </div>
+            <div
+                id="tavern_mnemosyne_feedback_answers"
+                class="mnemosyne-feedback-answers"
+            ></div>
+            <div
+                id="tavern_mnemosyne_feedback_facets_block"
+                class="mnemosyne-feedback-facets-block"
+                hidden
+            >
+                <span
+                    id="tavern_mnemosyne_feedback_facet_prompt"
+                    class="mnemosyne-feedback-facet-prompt"
+                ></span>
+                <div
+                    id="tavern_mnemosyne_feedback_facets"
+                    class="mnemosyne-feedback-facets"
+                ></div>
+            </div>
+            <textarea
+                id="tavern_mnemosyne_feedback_note"
+                class="mnemosyne-feedback-note"
+                rows="2"
+                maxlength="${SUBJECTIVE_FEEDBACK_NOTE_LIMIT}"
+                placeholder="主观感受（可选，仅保存在本机）"
+            ></textarea>
+            <div class="mnemosyne-feedback-card-footer">
+                <span
+                    id="tavern_mnemosyne_feedback_float_status"
+                    class="mnemosyne-feedback-float-status"
+                ></span>
+                <button
+                    id="tavern_mnemosyne_feedback_submit"
+                    class="menu_button"
+                    type="button"
+                    disabled
+                >提交</button>
+            </div>
+        </div>`;
+    document.body.append(float);
+    float.querySelector('#tavern_mnemosyne_feedback_pill')
+        ?.addEventListener('click', () => {
+            feedbackFloatState.collapsed = false;
+            const snapshot = realUseFeedbackController.snapshot();
+            if (snapshot.prepared) {
+                syncRealUseFeedbackUi();
+                return;
+            }
+            void prepareRecentRealUseFeedback();
+        });
+    float.querySelector('#tavern_mnemosyne_feedback_close')
+        ?.addEventListener('click', () => {
+            feedbackFloatState.collapsed = true;
+            syncRealUseFeedbackUi();
+        });
+    float.querySelector('#tavern_mnemosyne_feedback_submit')
+        ?.addEventListener('click', () => {
+            void submitRealUseFeedbackFromFloat();
+        });
+    return float;
+}
+
+function renderRealUseFeedbackCard(card, prepared) {
     const presentation =
         prepared?.questionnaire?.presentation;
-    const prompt = panel.querySelector(
+    const prompt = card.querySelector(
         '#tavern_mnemosyne_feedback_prompt',
     );
-    const facetPrompt = panel.querySelector(
+    const answers = card.querySelector(
+        '#tavern_mnemosyne_feedback_answers',
+    );
+    const facetsBlock = card.querySelector(
+        '#tavern_mnemosyne_feedback_facets_block',
+    );
+    const facetPrompt = card.querySelector(
         '#tavern_mnemosyne_feedback_facet_prompt',
     );
-    const facetSelect = panel.querySelector(
-        '#tavern_mnemosyne_feedback_facet',
+    const facets = card.querySelector(
+        '#tavern_mnemosyne_feedback_facets',
     );
-    const answers = panel.querySelector(
-        '#tavern_mnemosyne_feedback_answers',
+    const submit = card.querySelector(
+        '#tavern_mnemosyne_feedback_submit',
     );
     if (
         !presentation
         || !prompt
-        || !facetPrompt
-        || !facetSelect
         || !answers
+        || !facetsBlock
+        || !facetPrompt
+        || !facets
+        || !submit
     ) {
         return;
     }
-    panel.lang = presentation.language;
+    if (feedbackFloatState.caseId !== prepared.caseId) {
+        feedbackFloatState.caseId = prepared.caseId;
+        feedbackFloatState.verdict = null;
+        feedbackFloatState.facet = null;
+    }
+    card.lang = presentation.language;
     prompt.textContent = presentation.prompt;
     facetPrompt.textContent = presentation.facet_prompt;
-    facetSelect.replaceChildren();
-    const placeholder = document.createElement('option');
-    placeholder.value = '';
-    placeholder.textContent = '—';
-    facetSelect.append(placeholder);
-    for (const facet of presentation.facets) {
-        const option = document.createElement('option');
-        option.value = facet.value;
-        option.textContent = facet.label;
-        facetSelect.append(option);
-    }
+    const selectedAnswer = presentation.quick_answers.find(
+        quickAnswer =>
+            quickAnswer.value === feedbackFloatState.verdict,
+    );
     answers.replaceChildren();
     for (const quickAnswer of presentation.quick_answers) {
         const button = document.createElement('button');
-        button.className = 'menu_button';
+        button.className = 'mnemosyne-feedback-choice';
         button.type = 'button';
         button.dataset.feedbackAnswer = quickAnswer.value;
         button.textContent = quickAnswer.label;
+        button.classList.toggle(
+            'selected',
+            quickAnswer.value === feedbackFloatState.verdict,
+        );
         button.addEventListener('click', () => {
-            void realUseFeedbackController.submit({
-                quickAnswer: quickAnswer.value,
-                facet: facetSelect.value || null,
-            });
+            feedbackFloatState.verdict = quickAnswer.value;
+            if (!quickAnswer.requires_facet) {
+                feedbackFloatState.facet = null;
+            }
+            syncRealUseFeedbackUi();
         });
         answers.append(button);
     }
+    const needsFacet = selectedAnswer?.requires_facet === true;
+    facetsBlock.hidden = !needsFacet;
+    facets.replaceChildren();
+    if (needsFacet) {
+        for (const facet of presentation.facets) {
+            const chip = document.createElement('button');
+            chip.className = 'mnemosyne-feedback-choice';
+            chip.type = 'button';
+            chip.dataset.feedbackFacet = facet.value;
+            chip.textContent = facet.label;
+            chip.classList.toggle(
+                'selected',
+                facet.value === feedbackFloatState.facet,
+            );
+            chip.addEventListener('click', () => {
+                feedbackFloatState.facet = facet.value;
+                syncRealUseFeedbackUi();
+            });
+            facets.append(chip);
+        }
+    }
+    submit.disabled = (
+        !selectedAnswer
+        || (needsFacet && !feedbackFloatState.facet)
+    );
 }
 
 function syncRealUseFeedbackUi(
@@ -492,45 +786,62 @@ function syncRealUseFeedbackUi(
         const status = document.querySelector(
             '#tavern_mnemosyne_feedback_status',
         );
-        const openButton = document.querySelector(
-            '#tavern_mnemosyne_feedback_open',
-        );
         const exportButton = document.querySelector(
             '#tavern_mnemosyne_feedback_export',
         );
         const withdrawButton = document.querySelector(
             '#tavern_mnemosyne_feedback_withdraw',
         );
-        const panel = document.querySelector(
-            '#tavern_mnemosyne_feedback_panel',
-        );
-        if (openButton) {
-            openButton.disabled = (
-                !feedbackState.enabled
-                || feedbackState.recentRun === null
-            );
+        if (exportButton) {
+            const hasChat = Boolean(getContext().chatId);
+            exportButton.hidden = !hasChat;
+            exportButton.disabled = !hasChat;
         }
-        if (exportButton) exportButton.disabled = false;
         if (withdrawButton) {
+            withdrawButton.hidden =
+                feedbackState.lastFeedback === null;
             withdrawButton.disabled =
                 feedbackState.lastFeedback === null;
-        }
-        if (panel) {
-            panel.hidden = (
-                !feedbackState.enabled
-                || !feedbackState.panelOpen
-                || feedbackState.prepared === null
-            );
-            if (!panel.hidden) {
-                renderRealUseFeedbackQuestionnaire(
-                    panel,
-                    feedbackState.prepared,
-                );
-            }
         }
         if (status) {
             status.textContent = feedbackState.status;
             status.dataset.kind = feedbackState.statusKind;
+        }
+        const float = ensureRealUseFeedbackFloat();
+        const pill = float.querySelector(
+            '#tavern_mnemosyne_feedback_pill',
+        );
+        const card = float.querySelector(
+            '#tavern_mnemosyne_feedback_card',
+        );
+        const floatStatus = float.querySelector(
+            '#tavern_mnemosyne_feedback_float_status',
+        );
+        const hasTarget = (
+            feedbackState.recentRun !== null
+            || feedbackState.prepared !== null
+        );
+        float.hidden = !feedbackState.enabled || !hasTarget;
+        const showCard = (
+            !float.hidden
+            && feedbackState.prepared !== null
+            && !feedbackFloatState.collapsed
+        );
+        if (pill) pill.hidden = float.hidden || showCard;
+        if (card) {
+            card.hidden = !showCard;
+            if (showCard) {
+                renderRealUseFeedbackCard(
+                    card,
+                    feedbackState.prepared,
+                );
+            }
+        }
+        if (floatStatus) {
+            floatStatus.textContent =
+                feedbackState.statusKind === 'error'
+                    ? feedbackState.status
+                    : '';
         }
     } catch {
         // Feedback rendering never enters story generation state.
@@ -582,7 +893,40 @@ async function prepareRecentRealUseFeedback() {
 }
 
 async function withdrawRecentRealUseFeedback() {
-    return realUseFeedbackController.withdraw();
+    const reference =
+        realUseFeedbackController.snapshot().lastFeedback;
+    const result = await realUseFeedbackController.withdraw();
+    if (!result.ok || !reference) return result;
+    try {
+        const context = getContext();
+        const metadata = context.chatMetadata;
+        if (metadata) {
+            const removed = removeSubjectiveFeedbackNotes(
+                metadata,
+                { feedbackId: reference.feedback_id },
+            );
+            if (removed > 0) {
+                const persist =
+                    context.saveMetadataDebounced
+                    ?? context.saveMetadata;
+                if (typeof persist !== 'function') {
+                    throw new Error(
+                        'Chat metadata cannot be saved.',
+                    );
+                }
+                persist();
+            }
+        }
+    } catch (error) {
+        console.warn(
+            '[Mnemosyne] subjective feedback withdrawal failed:',
+            error,
+        );
+        setFeedbackLocalError(
+            '结构化反馈已撤回，但主观备注删除失败，请稍后重试。',
+        );
+    }
+    return result;
 }
 
 function downloadRealUseFeedbackExport(bundle) {
@@ -610,56 +954,6 @@ async function exportDeidentifiedRealUseFeedback() {
     });
 }
 
-function runActivityWritebackLabel(mode) {
-    return {
-        changed: '已更新',
-        no_change: '无需更新',
-    }[mode] ?? '未执行';
-}
-
-function runActivityLayerSummary(layers) {
-    if (!Array.isArray(layers) || layers.length === 0) {
-        return '无';
-    }
-    return layers
-        .map(layer => `${layer.label} × ${layer.count}`)
-        .join('、');
-}
-
-function runActivityQualitySummary(quality) {
-    if (quality?.status === 'pass_failed') {
-        return `工艺观测失败：${quality.reason_code}`;
-    }
-    if (quality?.status !== 'recorded') {
-        return '工艺观测：未记录';
-    }
-    const visibleMetricIds = [
-        'mattr',
-        'four_gram_echo_rate',
-        'no_change_turn',
-        'slop_hit_count',
-        'echo_rate',
-    ];
-    const values = visibleMetricIds
-        .filter(id => quality.metrics[id])
-        .map(id => `${id}=${quality.metrics[id].value}`);
-    const flags = Object.entries(quality.degradation_flags)
-        .filter(([, enabled]) => enabled)
-        .map(([id]) => id);
-    return `工艺观测：${values.join('，') || '已记录'}`
-        + `；退化标记：${flags.join('，') || '无'}。`;
-}
-
-function runActivityContinuityRulesSummary(rules) {
-    if (rules?.status === 'pass_failed') {
-        return `硬矛盾检查失败：${rules.reason_code}`;
-    }
-    if (rules?.status !== 'recorded') {
-        return '硬矛盾检查：未启用';
-    }
-    return `硬矛盾检查：${rules.hard_count}`;
-}
-
 function appendRunActivityLine(container, text) {
     const line = document.createElement('div');
     line.className = 'mnemosyne-activity-line';
@@ -682,58 +976,10 @@ function renderRunActivityEntries(container, entries) {
         body.className = 'mnemosyne-activity-entry-body';
         appendRunActivityLine(
             body,
-            `检索：${entry.retrieval.search_calls} 次，`
-            + `找到 ${entry.retrieval.search_result_count} 条；`
-            + `读取 ${entry.retrieval.read_calls} 次，`
-            + `读入 ${entry.retrieval.read_entry_count} 条。`,
-        );
-        appendRunActivityLine(
-            body,
-            `检索范围：${
-                runActivityLayerSummary(
-                    entry.retrieval.searched_layers,
-                )
-            }；实际读取：${
-                runActivityLayerSummary(
-                    entry.retrieval.read_layers,
-                )
-            }。`,
-        );
-        appendRunActivityLine(
-            body,
-            `保存：${
-                entry.persistence.story_body_sealed
-                    ? '回复正文已封存'
-                    : '回复正文未封存'
-            }；记忆写回${
-                runActivityWritebackLabel(
-                    entry.persistence.writeback_mode,
-                )
-            }，记录 ${entry.persistence.record_count} 条。`,
-        );
-        appendRunActivityLine(
-            body,
-            `更新范围：${
-                runActivityLayerSummary(
-                    entry.persistence.updated_layers,
-                )
-            }；安全检查拦截 ${
-                entry.safeguards.rejected_step_count
-            } 次。`,
-        );
-        appendRunActivityLine(
-            body,
-            runActivityQualitySummary(entry.quality),
-        );
-        appendRunActivityLine(
-            body,
-            runActivityContinuityRulesSummary(entry.continuity_rules),
-        );
-        appendRunActivityLine(
-            body,
-            `模型用量：输入 ${
-                entry.usage.prompt_tokens
-            }，输出 ${entry.usage.completion_tokens}。`,
+            `检索 ${entry.retrieval.search_calls} 次`
+            + ` · 读取 ${entry.retrieval.read_calls} 次`
+            + ` · 写回 ${entry.persistence.record_count} 条`
+            + ` · 安全检查 ${entry.safeguards.rejected_step_count} 次`,
         );
         details.append(body);
         container.append(details);
@@ -761,8 +1007,8 @@ function syncRunActivityUi(
         );
         if (openButton) {
             openButton.textContent = activityState.open
-                ? '关闭每轮记忆活动'
-                : '查看每轮记忆活动';
+                ? '收起每轮活动'
+                : '查看每轮活动';
             openButton.disabled = false;
         }
         if (refreshButton) {
@@ -3314,6 +3560,7 @@ async function onChatChanged() {
                 )
                 : 'Disabled',
         );
+        scheduleAutoStaticLoreIntake(expectedChatId);
     }, { chatId: expectedChatId });
 }
 
@@ -3866,21 +4113,6 @@ async function onSettingsReady(generateData) {
     }
 }
 
-async function probeConnection() {
-    updateStatus('Checking');
-    try {
-        const body = await loadProxyHealth();
-        const profile = inspectCurrentHostProfile();
-        updateStatus(
-            body.status === 'ok' && profile.status === 'ready'
-                ? 'Connected'
-                : `Blocked: ${profile.reason_code ?? 'unavailable'}`,
-        );
-    } catch {
-        updateStatus('Unavailable');
-    }
-}
-
 async function runDryCheck() {
     if (!settings().enabled) {
         updateStatus('Blocked: enable Mnemosyne');
@@ -4058,6 +4290,79 @@ async function runForwardingCheck() {
     }
 }
 
+function reconcileSummaryText(result) {
+    const report = result.reconcile_report ?? {};
+    return `保留 ${report.preserved_entity_count ?? 0}、`
+        + `新增 ${report.added_entity_count ?? 0}、`
+        + `退役 ${report.retired_entity_count ?? 0}`;
+}
+
+// The reconcile-approval button only exists while an intake plan is
+// actually waiting for the user; every other intake step is automatic.
+function syncIntakeApprovalUi() {
+    const button = document.querySelector(
+        '#tavern_mnemosyne_intake_apply',
+    );
+    if (!button) return;
+    const prepared = state.preparedIntake?.prepared;
+    const approval = prepared?.status === 'approval_required';
+    button.hidden = !approval;
+    if (approval) {
+        button.textContent =
+            `应用设定合并（${reconcileSummaryText(prepared)}）`;
+    }
+}
+
+// Drives the click-step intake state machine to a terminal state:
+// ready, a reconcile waiting for approval, or a repeated failure.
+async function autoRunStaticLoreIntake() {
+    if (state.exclusiveOperation !== null) return 'deferred';
+    let previousStatus = null;
+    let outcome = 'retryable';
+    for (let step = 0; step < 24; step += 1) {
+        await runStaticLoreIntake();
+        const prepared = state.preparedIntake?.prepared;
+        if (!prepared) {
+            outcome = state.status.startsWith('Blocked:')
+                ? 'retryable'
+                : 'complete';
+            break;
+        }
+        if (prepared.status === 'approval_required') {
+            outcome = 'waiting_for_approval';
+            break;
+        }
+        if (prepared.status === 'reconcile_blocked') break;
+        if (
+            prepared.status === 'retry_required'
+            && previousStatus === 'retry_required'
+        ) {
+            break;
+        }
+        previousStatus = prepared.status;
+    }
+    syncIntakeApprovalUi();
+    return outcome;
+}
+
+function scheduleAutoStaticLoreIntake(chatId, {
+    force = false,
+} = {}) {
+    void autoStaticLoreIntakeScheduler.schedule(chatId, { force });
+}
+
+async function applyPendingIntakeReconcile() {
+    const prepared = state.preparedIntake?.prepared;
+    if (prepared?.status !== 'approval_required') {
+        syncIntakeApprovalUi();
+        return;
+    }
+    // A second step on an approval_required plan applies it, then the
+    // driver finishes any remaining batches.
+    await runStaticLoreIntake();
+    await autoRunStaticLoreIntake();
+}
+
 async function runStaticLoreIntake() {
     if (state.intakePending) return;
     if (!claimExclusiveOperation('static-lore-intake')) return;
@@ -4126,18 +4431,12 @@ async function runStaticLoreIntake() {
                 prepared,
             };
         };
-        const reconcileSummary = result => {
-            const report = result.reconcile_report ?? {};
-            return `${report.preserved_entity_count ?? 0} kept, `
-                + `${report.added_entity_count ?? 0} added, `
-                + `${report.retired_entity_count ?? 0} retired`;
-        };
         const showReconcileStatus = result => {
             if (result.status === 'approval_required') {
                 updateStatus(
-                    `Reconcile ready: ${reconcileSummary(result)}; `
-                    + 'click again to apply',
+                    `设定合并需要确认：${reconcileSummaryText(result)}`,
                 );
+                syncIntakeApprovalUi();
                 return;
             }
             updateStatus(
@@ -4148,7 +4447,7 @@ async function runStaticLoreIntake() {
             const currentIntake = await prepareCurrentSources();
             if (currentIntake.prepared.status === 'ready') {
                 updateStatus(
-                    `Intake ready: ${currentIntake.prepared.concept_count} concepts`,
+                    `设定导入完成：${currentIntake.prepared.concept_count} 个概念`,
                 );
                 return;
             }
@@ -4163,20 +4462,16 @@ async function runStaticLoreIntake() {
             if (currentIntake.prepared.status === 'retry_required') {
                 state.preparedIntake = currentIntake;
                 updateStatus(
-                    `Batch ${currentIntake.prepared.batch_index}/`
-                    + `${currentIntake.prepared.batch_count} failed: `
-                    + `${currentIntake.prepared.failure_reason_code}; `
-                    + 'click to prepare retry',
+                    `设定导入批次 ${currentIntake.prepared.batch_index}/`
+                    + `${currentIntake.prepared.batch_count} 失败，将重试`,
                 );
                 return;
             }
             state.preparedIntake = currentIntake;
             const { prepared } = state.preparedIntake;
             updateStatus(
-                `Intake prepared: ${prepared.source_unit_count} units, `
-                + `${prepared.batch_count} batches; next `
-                + `${prepared.batch_index}/${prepared.batch_count}, `
-                + `${Math.ceil(prepared.batch_packet_bytes / 1024)} KiB`,
+                `设定导入已准备：${prepared.source_unit_count} 个单元、`
+                + `${prepared.batch_count} 个批次`,
             );
             return;
         }
@@ -4197,7 +4492,7 @@ async function runStaticLoreIntake() {
         if (refreshedIntake.prepared.status === 'ready') {
             state.preparedIntake = null;
             updateStatus(
-                `Intake ready: ${refreshedIntake.prepared.concept_count} concepts`,
+                `设定导入完成：${refreshedIntake.prepared.concept_count} 个概念`,
             );
             return;
         }
@@ -4228,7 +4523,9 @@ async function runStaticLoreIntake() {
                 showReconcileStatus(refreshedIntake.prepared);
                 return;
             }
-            updateStatus(`Applying reconcile: ${reconcileSummary(prepared)}`);
+            updateStatus(
+                `正在应用设定合并（${reconcileSummaryText(prepared)}）`,
+            );
             const confirmed = await currentControlClient()
                 .confirmIntakeReconciliation(
                     {
@@ -4264,7 +4561,7 @@ async function runStaticLoreIntake() {
             }
             state.preparedIntake = null;
             updateStatus(
-                `Reconcile applied: ${confirmed.concept_count} concepts`,
+                `设定合并完成：${confirmed.concept_count} 个概念`,
             );
             return;
         }
@@ -4279,8 +4576,8 @@ async function runStaticLoreIntake() {
                 return;
             }
             updateStatus(
-                `Checking saved paid artifacts for batch `
-                + `${prepared.batch_index}/${prepared.batch_count}`,
+                `正在检查批次 ${prepared.batch_index}/`
+                + `${prepared.batch_count} 已保存的结果`,
             );
             const recovered = await currentControlClient().recoverIntake(
                 {
@@ -4316,17 +4613,17 @@ async function runStaticLoreIntake() {
                     prepared: recovered.next_batch,
                 };
                 updateStatus(
-                    `Recovered paid batch `
-                    + `${recovered.completed_batch_index}/${recovered.batch_count}; `
-                    + `${recovered.concept_count_so_far} concepts`,
+                    `已恢复批次 ${recovered.completed_batch_index}/`
+                    + `${recovered.batch_count}，累计 `
+                    + `${recovered.concept_count_so_far} 个概念`,
                 );
                 return;
             }
             if (recovered.status === 'ready') {
                 state.preparedIntake = null;
                 updateStatus(
-                    `Intake ready from saved artifact: `
-                    + `${recovered.concept_count} concepts`,
+                    `设定导入完成（使用已保存结果）：`
+                    + `${recovered.concept_count} 个概念`,
                 );
                 return;
             }
@@ -4368,19 +4665,17 @@ async function runStaticLoreIntake() {
                 prepared: retryPrepared,
             };
             updateStatus(
-                `Retry prepared: batch ${retryPrepared.batch_index}/`
-                + `${retryPrepared.batch_count}, attempt `
-                + `${retryPrepared.batch_attempt}`,
+                `重试已准备：批次 ${retryPrepared.batch_index}/`
+                + `${retryPrepared.batch_count}，第 `
+                + `${retryPrepared.batch_attempt} 次尝试`,
             );
             return;
         }
         if (refreshedIntake.prepared.status === 'retry_required') {
             state.preparedIntake = refreshedIntake;
             updateStatus(
-                `Batch ${refreshedIntake.prepared.batch_index}/`
-                + `${refreshedIntake.prepared.batch_count} failed: `
-                + `${refreshedIntake.prepared.failure_reason_code}; `
-                + 'click to prepare retry',
+                `设定导入批次 ${refreshedIntake.prepared.batch_index}/`
+                + `${refreshedIntake.prepared.batch_count} 失败，将重试`,
             );
             return;
         }
@@ -4395,16 +4690,15 @@ async function runStaticLoreIntake() {
         if (refreshedIntake.prepared.snapshot_hash !== prepared.snapshot_hash) {
             state.preparedIntake = refreshedIntake;
             updateStatus(
-                `Sources changed; intake prepared: `
-                + `${refreshedIntake.prepared.source_unit_count} units, `
-                + `${refreshedIntake.prepared.batch_count} batches`,
+                `设定来源已变化：${refreshedIntake.prepared.source_unit_count}`
+                + ` 个单元、${refreshedIntake.prepared.batch_count} 个批次`,
             );
             return;
         }
         if (refreshedIntake.prepared.request_id !== prepared.request_id) {
             state.preparedIntake = refreshedIntake;
             updateStatus(
-                `Intake resumed: batch `
+                `设定导入继续：批次 `
                 + `${refreshedIntake.prepared.batch_index}/`
                 + `${refreshedIntake.prepared.batch_count}`,
             );
@@ -4419,9 +4713,9 @@ async function runStaticLoreIntake() {
             { lease: intakeControlLease },
         );
         updateStatus(
-            `Intake model call: batch ${stablePrepared.batch_index}/`
-            + `${stablePrepared.batch_count}, `
-            + `${stablePrepared.batch_source_unit_count} units`,
+            `设定导入模型调用：批次 ${stablePrepared.batch_index}/`
+            + `${stablePrepared.batch_count}（`
+            + `${stablePrepared.batch_source_unit_count} 个单元）`,
         );
         state.preparedIntake = null;
         const modelRequest = stablePrepared.model_request;
@@ -4491,13 +4785,14 @@ async function runStaticLoreIntake() {
                 prepared: result.next_batch,
             };
             updateStatus(
-                `Batch ${result.completed_batch_index}/${result.batch_count} `
-                + `ready; ${result.concept_count_so_far} concepts`,
+                `设定导入：批次 ${result.completed_batch_index}/`
+                + `${result.batch_count} 完成，累计 `
+                + `${result.concept_count_so_far} 个概念`,
             );
             return;
         }
         updateStatus(
-            `Intake ready: ${result.concept_count} concepts`,
+            `设定导入完成：${result.concept_count} 个概念`,
         );
     } catch (error) {
         updateStatus(
@@ -4520,7 +4815,42 @@ async function requireSuccessfulText(response, description) {
     return response.text();
 }
 
-async function browserFolderProvisioningInput() {
+async function resolveCurrentProvisioningUpstreamUrl(
+    presetCustomUrl,
+    rootHandle,
+) {
+    let resolution;
+    try {
+        resolution = resolveProvisioningUpstreamUrl({
+            currentUrl: presetCustomUrl,
+            persistedUrl: settings().upstreamCustomUrl,
+        });
+    } catch (error) {
+        if (
+            error?.reasonCode
+                !== 'browser_folder_upstream_url_invalid'
+            || !rootHandle
+        ) {
+            throw error;
+        }
+        const installed =
+            await readInstalledBrowserFolderRuntimeConfig(rootHandle);
+        resolution = resolveProvisioningUpstreamUrl({
+            currentUrl: presetCustomUrl,
+            persistedUrl: settings().upstreamCustomUrl,
+            installedRuntimeUrl: installed?.upstreamBaseUrl,
+        });
+    }
+    if (resolution.snapshotUrl !== null) {
+        settings().upstreamCustomUrl = resolution.snapshotUrl;
+        saveSettingsDebounced();
+    }
+    return resolution.upstreamUrl;
+}
+
+async function browserFolderProvisioningInput({
+    rootHandle,
+} = {}) {
     const preset = getChatCompletionPreset();
     if (
         main_api !== 'openai'
@@ -4571,7 +4901,11 @@ async function browserFolderProvisioningInput() {
         hostVersion: hostVersion.pkgVersion,
         expectedExtensionVersion: extensionManifest.version,
         runtimeConfig: createBrowserFolderRuntimeConfig({
-            upstreamBaseUrl: preset.custom_url,
+            upstreamBaseUrl:
+                await resolveCurrentProvisioningUpstreamUrl(
+                    preset.custom_url,
+                    rootHandle,
+                ),
             upstreamModel: currentHostBinding().model,
             providerContextTokens:
                 Number(oai_settings.openai_max_context),
@@ -4659,6 +4993,10 @@ function settleProvisioningReady({
     button.textContent = '已启用';
     button.disabled = true;
     updateStatus('Ready');
+    scheduleAutoStaticLoreIntake(
+        getContext().chatId ?? null,
+        { force: true },
+    );
 }
 
 async function resumeProvisioningVerification({
@@ -4681,18 +5019,71 @@ async function resumeProvisioningVerification({
                 button,
                 lease: inspected.lease,
             });
+            return;
         }
+        const reason = {
+            reasonCode:
+                inspected.prior_error
+                ?? inspected.reason_code
+                ?? 'mnemosyne_loopback_unavailable',
+        };
+        statusElement.textContent = pendingRestart
+            ? [
+                '尚未检测到本机运行时。',
+                '请先重启 SillyTavern；若已重启，请点“重新检查或修复”。',
+            ].join('')
+            : `运行时不可用：${provisioningFailureText(reason)}`;
+        statusElement.dataset.kind = pendingRestart
+            ? 'pending'
+            : 'error';
+        button.textContent = '重新检查或修复';
+        button.disabled = false;
+        updateStatus('Unavailable');
     } catch (error) {
         if (pendingRestart) {
             // A pending install remains pending until the bridge is healthy.
             return;
         }
         statusElement.textContent =
-            `恢复绑定失败：${error.reasonCode ?? error.message}`;
+            `恢复绑定失败：${provisioningFailureText(error)}`;
         statusElement.dataset.kind = 'error';
         button.textContent = '重新检查或修复';
         button.disabled = false;
+        updateStatus('Unavailable');
     }
+}
+
+const PROVISIONING_ERROR_MESSAGES = Object.freeze({
+    browser_folder_custom_openai_required:
+        '请先在 API 连接页选择 Custom (OpenAI-compatible) 并填入上游服务地址。',
+    browser_folder_upstream_url_invalid:
+        '未找到真实的上游服务地址。请在 API 连接页填入你的 Custom OpenAI 端点后重试。',
+    browser_folder_upstream_model_missing:
+        '请先在 API 连接页选择模型。',
+    browser_folder_provider_budget_invalid:
+        '请检查上下文长度与回复长度设置后重试。',
+    browser_folder_permission_not_granted:
+        '未获得文件夹读写授权。请重试，并在浏览器弹窗中允许访问。',
+    browser_folder_version_attestation_failed:
+        '无法确认 SillyTavern 版本，请刷新页面后重试。',
+    browser_folder_artifact_unavailable:
+        '扩展安装包不完整，请重新安装扩展后重试。',
+    browser_folder_runtime_config_invalid:
+        '现有运行时配置已损坏。请在 API 连接页重新填写上游地址后重试。',
+    mnemosyne_provisioning_unsupported:
+        '当前部署方式暂不支持一键启用。',
+    main_host_binding_unavailable:
+        '运行时尚未就绪，请稍后重试。',
+    mnemosyne_provisioning_verification_failed:
+        '安装后未检测到健康运行时。请完成一次 SillyTavern 重启后再试。',
+});
+
+function provisioningFailureText(error) {
+    if (error?.name === 'AbortError') return '已取消。';
+    const message = PROVISIONING_ERROR_MESSAGES[error?.reasonCode];
+    if (message) return message;
+    console.error('[Mnemosyne] provisioning failed', error);
+    return '启用未完成，请重试。';
 }
 
 async function enableMnemosyneFromProvisioningCard({
@@ -4758,7 +5149,7 @@ async function enableMnemosyneFromProvisioningCard({
         });
     } catch (error) {
         statusElement.textContent =
-            `启用失败：${error.reasonCode ?? error.message}`;
+            `启用失败：${provisioningFailureText(error)}`;
         if (error.recovery && planElement) {
             planElement.hidden = false;
             planElement.textContent = [
@@ -4814,7 +5205,7 @@ function addSettingsUi() {
                 </div>
                 <label class="checkbox_label">
                     <input id="tavern_mnemosyne_enabled" type="checkbox">
-                    <span>记忆运行开关</span>
+                    <span>Mnemosyne 运行开关</span>
                 </label>
                 <details class="mnemosyne-advanced-loopback">
                     <summary>高级：现有 loopback / Termux 兼容设置</summary>
@@ -4833,94 +5224,48 @@ function addSettingsUi() {
                     </div>
                 </details>
                 <div class="mnemosyne-status-row">
+                    <span id="tavern_mnemosyne_status" class="mnemosyne-status">已关闭</span>
                     <button
-                        id="tavern_mnemosyne_probe"
-                        class="menu_button mnemosyne-icon-button"
+                        id="tavern_mnemosyne_intake_apply"
+                        class="menu_button"
                         type="button"
-                        title="Check Agent Proxy"
-                        aria-label="Check Agent Proxy"
-                    ><i class="fa-solid fa-plug"></i></button>
-                    <button
-                        id="tavern_mnemosyne_intake"
-                        class="menu_button mnemosyne-icon-button"
-                        type="button"
-                        title="Initialize Static Lore"
-                        aria-label="Initialize Static Lore"
-                    ><i class="fa-solid fa-file-import"></i></button>
-                    <span id="tavern_mnemosyne_status" class="mnemosyne-status">Disabled</span>
+                        hidden
+                    >应用设定合并</button>
                 </div>
-                <div class="mnemosyne-feedback-panel">
+                <details class="mnemosyne-feedback-panel">
+                    <summary>真实使用反馈</summary>
                     <label class="checkbox_label">
                         <input
                             id="tavern_mnemosyne_feedback_enabled"
                             type="checkbox"
                         >
-                        <span>Local real-use feedback</span>
+                        <span>记录真实使用反馈（仅保存在本机）</span>
                     </label>
-                    <small>
-                        Structured answers stay on this device, are not story
-                        memory, and are never uploaded automatically.
-                    </small>
                     <div class="mnemosyne-feedback-actions">
-                        <button
-                            id="tavern_mnemosyne_feedback_open"
-                            class="menu_button"
-                            type="button"
-                        >Evaluate latest governed reply</button>
                         <button
                             id="tavern_mnemosyne_feedback_export"
                             class="menu_button"
                             type="button"
-                        >Export de-identified feedback</button>
+                        >导出反馈数据</button>
                         <button
                             id="tavern_mnemosyne_feedback_withdraw"
                             class="menu_button"
                             type="button"
-                        >Withdraw recent feedback</button>
-                    </div>
-                    <small>
-                        De-identified does not mean anonymous; an exported
-                        bundle can retain residual re-identification risk.
-                    </small>
-                    <div
-                        id="tavern_mnemosyne_feedback_panel"
-                        class="mnemosyne-feedback-question"
-                        hidden
-                    >
-                        <span id="tavern_mnemosyne_feedback_prompt"></span>
-                        <label
-                            class="mnemosyne-feedback-facet"
-                            for="tavern_mnemosyne_feedback_facet"
-                        >
-                            <span
-                                id="tavern_mnemosyne_feedback_facet_prompt"
-                            ></span>
-                            <select
-                                id="tavern_mnemosyne_feedback_facet"
-                            ></select>
-                        </label>
-                        <div
-                            id="tavern_mnemosyne_feedback_answers"
-                            class="mnemosyne-feedback-answers"
-                        ></div>
+                        >撤回最近一条</button>
                     </div>
                     <span
                         id="tavern_mnemosyne_feedback_status"
                         class="mnemosyne-feedback-status"
-                    >Feedback disabled</span>
-                </div>
+                    >反馈未开启</span>
+                </details>
                 <div class="mnemosyne-activity-panel">
-                    <b>每轮记忆活动</b>
-                    <small>
-                        这里只显示检索、读取、写回和安全检查的计数，
-                        不显示聊天正文。
-                    </small>
+                    <b>每轮活动</b>
                     <div class="mnemosyne-activity-actions">
                         <button
                             id="tavern_mnemosyne_activity_open"
                             class="menu_button"
                             type="button"
-                        >查看每轮记忆活动</button>
+                        >查看每轮活动</button>
                         <button
                             id="tavern_mnemosyne_activity_refresh"
                             class="menu_button"
@@ -4936,7 +5281,7 @@ function addSettingsUi() {
                         <span
                             id="tavern_mnemosyne_activity_status"
                             class="mnemosyne-activity-status"
-                        >尚未查看每轮记忆活动。</span>
+                        >尚未查看。</span>
                         <div
                             id="tavern_mnemosyne_activity_entries"
                             class="mnemosyne-activity-entries"
@@ -4969,7 +5314,7 @@ function addSettingsUi() {
     sessionToken.value = current.sessionToken;
     feedbackEnabled.checked =
         current.realUseFeedbackEnabled === true;
-    updateStatus(current.enabled ? 'Ready' : 'Disabled');
+    updateStatus(current.enabled ? 'Checking' : 'Disabled');
     realUseFeedbackController.setEnabled(
         current.realUseFeedbackEnabled === true,
     );
@@ -4979,6 +5324,11 @@ function addSettingsUi() {
         if (!current.enabled) {
             clearInjections();
             updateStatus('Disabled');
+        } else {
+            scheduleAutoStaticLoreIntake(
+                getContext().chatId ?? null,
+                { force: true },
+            );
         }
         saveSettingsDebounced();
     });
@@ -5009,15 +5359,10 @@ function addSettingsUi() {
         statusElement: provisioningStatus,
         button: provisioningButton,
     });
-    container.querySelector('#tavern_mnemosyne_probe')
-        ?.addEventListener('click', () => probeConnection());
-    container.querySelector('#tavern_mnemosyne_intake')
-        ?.addEventListener('click', () => runStaticLoreIntake());
-    container.querySelector('#tavern_mnemosyne_feedback_open')
-        ?.addEventListener(
-            'click',
-            () => prepareRecentRealUseFeedback(),
-        );
+    container.querySelector('#tavern_mnemosyne_intake_apply')
+        ?.addEventListener('click', () => {
+            void applyPendingIntakeReconcile();
+        });
     container.querySelector('#tavern_mnemosyne_feedback_export')
         ?.addEventListener(
             'click',

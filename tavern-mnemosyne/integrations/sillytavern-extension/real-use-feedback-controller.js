@@ -58,7 +58,7 @@ function initialState() {
     prepared: null,
     lastFeedback: null,
     panelOpen: false,
-    status: 'Feedback disabled',
+    status: '反馈未开启',
     statusKind: 'idle',
   };
 }
@@ -100,14 +100,26 @@ export function createRealUseFeedbackController({
     notify();
   }
 
+  const FAILURE_TEXT = Object.freeze({
+    real_use_feedback_disabled: '请先开启反馈记录。',
+    real_use_feedback_target_unavailable: '暂无可评价的回复。',
+    real_use_feedback_target_changed: '回复已变化，请重新打开评价。',
+    feedback_case_unavailable: '这条回复已不能再评价。',
+    real_use_feedback_case_unavailable: '请先打开评价窗口。',
+    real_use_feedback_withdraw_unavailable: '没有可撤回的反馈。',
+    real_use_feedback_chat_unavailable: '请先打开一个聊天。',
+    feedback_export_empty: '还没有可导出的反馈。',
+  });
+
   function fail(error) {
     const reasonCode =
       error?.reasonCode
       ?? 'real_use_feedback_failed';
-    setStatus(
-      `Feedback unavailable: ${reasonCode}`,
-      'error',
-    );
+    const text = FAILURE_TEXT[reasonCode];
+    if (!text) {
+      console.warn('[Mnemosyne] feedback failed:', reasonCode, error);
+    }
+    setStatus(text ?? '反馈暂时不可用。', 'error');
     return {
       ok: false,
       reason_code: reasonCode,
@@ -127,10 +139,10 @@ export function createRealUseFeedbackController({
     state.status = enabled
       ? (
           state.recentRun
-            ? 'Latest governed reply is ready to evaluate.'
-            : 'No recent governed reply is available.'
+            ? '最近一条回复可以评价。'
+            : '暂无可评价的回复。'
         )
-      : 'Feedback disabled';
+      : '反馈未开启';
     state.statusKind = 'idle';
     notify();
   }
@@ -185,8 +197,8 @@ export function createRealUseFeedbackController({
     state.prepared = null;
     state.panelOpen = false;
     state.status = state.enabled
-      ? 'Latest governed reply is ready to evaluate.'
-      : 'Feedback disabled';
+      ? '最近一条回复可以评价。'
+      : '反馈未开启';
     state.statusKind = 'idle';
     notify();
   }
@@ -201,8 +213,8 @@ export function createRealUseFeedbackController({
     state.panelOpen = false;
     if (clearLastFeedback) state.lastFeedback = null;
     state.status = state.enabled
-      ? 'No recent governed reply is available.'
-      : 'Feedback disabled';
+      ? '暂无可评价的回复。'
+      : '反馈未开启';
     state.statusKind = 'idle';
     notify();
   }
@@ -219,10 +231,10 @@ export function createRealUseFeedbackController({
       if (!recentRun) {
         throw controllerError(
           'real_use_feedback_target_unavailable',
-          'No recent governed reply is available.',
+          '暂无可评价的回复。',
         );
       }
-      setStatus('Preparing the governed evaluation case…');
+      setStatus('正在准备评价…');
       const result = await post(
         '/v1/mnemosyne/evaluation/prepare',
         structuredClone(recentRun),
@@ -256,7 +268,7 @@ export function createRealUseFeedbackController({
         state.prepared = null;
         state.panelOpen = false;
         setStatus(
-          'Feedback already exists; it can be withdrawn.',
+          '这条回复已评价过，可以撤回。',
           'success',
         );
         return { ok: true, status: 'answered' };
@@ -295,9 +307,7 @@ export function createRealUseFeedbackController({
       });
       state.prepared = prepared;
       state.panelOpen = true;
-      setStatus(
-        'Evaluation ready. Choose one structured answer.',
-      );
+      setStatus('请选择你的评价。');
       return { ok: true, status: 'prepared' };
     } catch (error) {
       return fail(error);
@@ -348,10 +358,18 @@ export function createRealUseFeedbackController({
       );
       if (state.prepared !== prepared) {
         setStatus(
-          'Feedback was recorded for the previous chat; its local withdrawal reference was cleared.',
+          '已记录到此前的聊天。',
           'success',
         );
-        return { ok: true, status: 'recorded_for_previous_target' };
+        return {
+          ok: true,
+          status: 'recorded_for_previous_target',
+          feedback: {
+            feedback_id: result?.feedback_id,
+            feedback_hash: result?.feedback_hash,
+            chat_id: prepared.chatId,
+          },
+        };
       }
       const lastFeedback = Object.freeze({
         feedback_id: result?.feedback_id,
@@ -370,10 +388,14 @@ export function createRealUseFeedbackController({
       state.prepared = null;
       state.panelOpen = false;
       setStatus(
-        'Recorded in the local evaluation ledger.',
+        '已记录（仅保存在本机）。',
         'success',
       );
-      return { ok: true, status: 'recorded' };
+      return {
+        ok: true,
+        status: 'recorded',
+        feedback: structuredClone(lastFeedback),
+      };
     } catch (error) {
       return fail(error);
     }
@@ -402,7 +424,7 @@ export function createRealUseFeedbackController({
         state.lastFeedback = null;
       }
       setStatus(
-        'Recent feedback was logically withdrawn.',
+        '最近一条反馈已撤回。',
         'success',
       );
       return { ok: true, status: 'withdrawn' };
@@ -430,11 +452,11 @@ export function createRealUseFeedbackController({
       );
       download(bundle);
       setStatus(
-        `Exported ${
+        `已导出 ${
           Array.isArray(bundle?.records)
             ? bundle.records.length
             : 0
-        } server-de-identified record(s).`,
+        } 条去识别记录。`,
         'success',
       );
       return { ok: true, status: 'exported' };
