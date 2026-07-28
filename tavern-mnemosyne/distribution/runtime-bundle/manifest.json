@@ -1,18 +1,18 @@
 {
   "schema": "mnemosyne.self-contained-runtime-bundle.v1",
-  "runtime_build_id": "tavern-mnemosyne@0.2.3+runtime.78d43a54a3520212",
-  "package_version": "0.2.3",
+  "runtime_build_id": "tavern-mnemosyne@0.2.4+runtime.7dd4de355d5ad54f",
+  "package_version": "0.2.4",
   "minimum_node_major": 22,
   "entrypoint": "companion-launcher.mjs",
   "archive": "runtime.tar.gz",
-  "archive_sha256": "5b009eb5b76218f40c1d9a543595cbba65e227ff843b3dc3346bbf54980b030f",
-  "archive_bytes": 28312301,
+  "archive_sha256": "ae676edd14771bd8bed3e18d35ec572f34da0f836c800f4331498910e120a29c",
+  "archive_bytes": 28374775,
   "release_asset": {
     "repository": "winintony/tavern-mnemosyne",
-    "tag": "v0.2.3",
-    "name": "Tavern-Mnemosyne-Runtime-v0.2.3.tar.gz"
+    "tag": "v0.2.4",
+    "name": "Tavern-Mnemosyne-Runtime-v0.2.4.tar.gz"
   },
-  "content_manifest_sha256": "78d43a54a3520212f4e23f70491d1bba8591a77a66875ae0c2e91a30d0855aa3",
+  "content_manifest_sha256": "7dd4de355d5ad54f2a7aede78e491bd65e5eec86332c28aba31bafedc8d1614b",
   "files": [
     {
       "path": "companion-launcher.mjs",
@@ -2551,12 +2551,12 @@
     },
     {
       "path": "package-lock.json",
-      "sha256": "a091cdb5fb7b474835ca6fb390e26046ad29d40c3d5cfcec36b46e61aa0faddd",
+      "sha256": "4d074eb8b803ad0003d4c8a85998ccb297a049c3e69a560c29db36aee0b4b8fa",
       "bytes": 1436
     },
     {
       "path": "package.json",
-      "sha256": "d2f826875e4220b6d2a8efca2f6b6840e740df3fccb07de921a331f38b1c9f0f",
+      "sha256": "1f3a512d9f4bb156bcceb1a9bfbfd9124734526911aa9acc7ce977d9a980edab",
       "bytes": 845
     },
     {
@@ -2670,6 +2670,31 @@
       "bytes": 91967
     },
     {
+      "path": "src/evaluation/longform-eval-report.js",
+      "sha256": "791b81e3dbf230e840c8ae567464da1bd857ea22eab5c355c02436175a2c16e1",
+      "bytes": 10252
+    },
+    {
+      "path": "src/evaluation/longform-fixture-loader.js",
+      "sha256": "e82192094390fcc0ae8c17f7dd26a8d5c8a61c826fd42d298fe13af98147af6c",
+      "bytes": 2605
+    },
+    {
+      "path": "src/evaluation/longform-fixture-schema.js",
+      "sha256": "f496391f363cf2c55c1b229d2693f01c8226acbdcaa1a0be736a1626e1d6a87b",
+      "bytes": 21084
+    },
+    {
+      "path": "src/evaluation/longform-runner.js",
+      "sha256": "79aeb9a6f5a34cc5e7a2617c72132e106285518b3333e307e299069d404f8ddb",
+      "bytes": 13590
+    },
+    {
+      "path": "src/evaluation/longform-scripted-provider.js",
+      "sha256": "afc301f3f67b83516a611124a71415e7965dbc2e5b34782b81bae48df6644128",
+      "bytes": 4282
+    },
+    {
       "path": "src/evaluation/story-craft-mechanical-evaluator.js",
       "sha256": "dddbd28c7f02d3ffbe1c3d58cbc45716ee46ec3bc17c378cbf9251ae4d196206",
       "bytes": 15276
@@ -2683,6 +2708,11 @@
       "path": "src/evaluation/turn-capture-manifest.js",
       "sha256": "51dff280a9a00874997e2e9e061bb76beae66f79119b65f4e32443055ac4e63b",
       "bytes": 12079
+    },
+    {
+      "path": "src/evaluation/turn-capture-rollup.js",
+      "sha256": "27437d1db951c84e25584a06ef0c33802e1f406920a4736fd1d67ebcbcacc189",
+      "bytes": 5243
     },
     {
       "path": "src/harness/branch-history-replay.js",
