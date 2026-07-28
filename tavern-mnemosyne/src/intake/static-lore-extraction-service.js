@@ -36,19 +36,6 @@ export const DEFAULT_STATIC_LORE_MAX_INPUT_BYTES = 1_500_000;
 const DEFAULT_MAX_BATCH_BYTES = 3_000;
 const DEFAULT_MAX_BATCH_UNITS = 1;
 export const DEFAULT_STATIC_LORE_MAX_OUTPUT_TOKENS = 6_000;
-const MODEL_REQUEST_KEYS = [
-  'messages',
-  'tools',
-  'tool_choice',
-  'max_tokens',
-  'temperature',
-  'stream',
-];
-const FORWARDED_MODEL_REQUEST_KEYS = new Set([
-  ...MODEL_REQUEST_KEYS,
-  'model',
-  'mnemosyne_intake_request_id',
-]);
 const TRANSPORT_FAILURE_REASON_CODES = new Set([
   'static_lore_intake_client_cancelled',
   'static_lore_intake_stream_did_not_terminate',
@@ -588,6 +575,26 @@ function preparedRequest({
   };
 }
 
+function adaptedPreparedRequest(request, adaptModelRequest) {
+  const adapted = adaptModelRequest(structuredClone(request));
+  const optionalCompatibilityFields = new Set(['tool_choice']);
+  if (
+    !adapted
+    || typeof adapted !== 'object'
+    || Array.isArray(adapted)
+    || Object.keys(adapted).some(key => !Object.hasOwn(request, key))
+    || Object.keys(request).some(key => (
+      !optionalCompatibilityFields.has(key)
+      && !Object.hasOwn(adapted, key)
+    ))
+  ) {
+    throw new Error(
+      'Static Lore provider adaptation returned an unsafe request shape.',
+    );
+  }
+  return adapted;
+}
+
 function safeBatchFailureDetailCode(error) {
   const cause = String(
     error?.details?.cause
@@ -955,6 +962,7 @@ export function createStaticLoreExtractionService({
   maxBatchUnits = DEFAULT_MAX_BATCH_UNITS,
   maxTextUnitBytes = DEFAULT_STATIC_LORE_TEXT_UNIT_BYTES,
   maxOutputTokens = DEFAULT_STATIC_LORE_MAX_OUTPUT_TOKENS,
+  adaptModelRequest = request => request,
   now = () => new Date(),
 } = {}) {
   if (
@@ -993,6 +1001,11 @@ export function createStaticLoreExtractionService({
   if (!Number.isSafeInteger(maxOutputTokens) || maxOutputTokens <= 0) {
     throw new Error(
       'Static Lore Extraction Service maxOutputTokens must be a positive safe integer.',
+    );
+  }
+  if (typeof adaptModelRequest !== 'function') {
+    throw new Error(
+      'Static Lore Extraction Service adaptModelRequest must be a function.',
     );
   }
   const pending = new Map();
@@ -1385,14 +1398,14 @@ export function createStaticLoreExtractionService({
           correction,
         }
       : null;
-    const modelRequest = preparedRequest({
+    const modelRequest = adaptedPreparedRequest(preparedRequest({
       model: session.model,
       packet: batch,
       catalog: staticLoreCatalog(session.aggregate),
       currentStateCatalog: staticLoreCurrentStateCatalog(session.aggregate),
       maxOutputTokens,
       retryContext,
-    });
+    }), adaptModelRequest);
     const preparedResponse = {
       schema: 'mnemosyne.static-lore-intake-prepared.v1',
       status: 'prepared',
@@ -3134,14 +3147,18 @@ export function createStaticLoreExtractionService({
           'Static Lore Intake already has a paid request in progress.',
         );
       }
+      const forwardedKeys = new Set([
+        ...Object.keys(record.modelRequest),
+        'mnemosyne_intake_request_id',
+      ]);
       if (
         !requestBody
         || typeof requestBody !== 'object'
         || Array.isArray(requestBody)
         || Object.keys(requestBody).length
-          !== FORWARDED_MODEL_REQUEST_KEYS.size
+          !== forwardedKeys.size
         || Object.keys(requestBody).some(
-          key => !FORWARDED_MODEL_REQUEST_KEYS.has(key),
+          key => !forwardedKeys.has(key),
         )
       ) {
         fail(
@@ -3159,7 +3176,7 @@ export function createStaticLoreExtractionService({
           'Static Lore model request identity does not match its preparation.',
         );
       }
-      for (const key of MODEL_REQUEST_KEYS) {
+      for (const key of Object.keys(record.modelRequest)) {
         if (
           canonicalJson(requestBody[key])
           !== canonicalJson(record.modelRequest[key])

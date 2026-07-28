@@ -137,6 +137,7 @@ export function createOpenAiToolProvider({
   model,
   headers = {},
   auth = { mode: 'configured' },
+  adaptRequest = request => request,
 } = {}) {
   if (typeof fetchImpl !== 'function') {
     throw new Error('OpenAI tool provider requires fetchImpl.');
@@ -146,6 +147,9 @@ export function createOpenAiToolProvider({
   }
   if (typeof model !== 'string' || !model.trim()) {
     throw new Error('OpenAI tool provider requires a model.');
+  }
+  if (typeof adaptRequest !== 'function') {
+    throw new Error('OpenAI tool provider adaptRequest must be a function.');
   }
 
   const resolvedAuth = normalizeAuth(auth);
@@ -173,7 +177,7 @@ export function createOpenAiToolProvider({
         headersForStep.authorization = authContext.authorization;
       }
       const requestBody = constrainProviderRequestOutput({
-        requestBody: {
+        requestBody: adaptRequest({
           ...creativeParameters(creativeRequest),
           model,
           stream: false,
@@ -181,7 +185,7 @@ export function createOpenAiToolProvider({
           tools: structuredClone(tools),
           tool_choice: toolChoice,
           parallel_tool_calls: parallelToolCalls,
-        },
+        }),
         providerBudget,
         runId,
       });

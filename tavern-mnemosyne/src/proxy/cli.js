@@ -65,6 +65,9 @@ import {
 } from '../storage/sqlite-wal-runtime-safety.js';
 import { createOpenAiToolProvider } from './openai-tool-provider.js';
 import {
+  adaptOpenAiCompatibleRequest,
+} from './provider-request-compatibility.js';
+import {
   countOpenAiTokens,
   createProviderBudgetPolicy,
 } from './provider-step-budget.js';
@@ -457,6 +460,10 @@ const staticLoreExtractionService = staticLoreIntake && mainHostBinding
     freshIntakeAdmissionGuard,
     maxInputBytes: staticLoreMaxInputBytes,
     maxOutputTokens: staticLoreMaxOutputTokens,
+    adaptModelRequest: request => adaptOpenAiCompatibleRequest({
+      requestBody: request,
+      endpoint: upstreamBaseUrl,
+    }),
   })
   : null;
 const stateHistory = chatSaveStore
@@ -504,6 +511,10 @@ const toolProvider = (
       endpoint: `${upstreamBaseUrl}/chat/completions`,
       model: upstreamModel,
       headers: upstreamHeaders,
+      adaptRequest: request => adaptOpenAiCompatibleRequest({
+        requestBody: request,
+        endpoint: upstreamBaseUrl,
+      }),
       auth: upstreamAuthMode === 'passthrough'
         ? { mode: 'passthrough' }
         : {

@@ -1,18 +1,18 @@
 {
   "schema": "mnemosyne.self-contained-runtime-bundle.v1",
-  "runtime_build_id": "tavern-mnemosyne@0.2.4+runtime.7dd4de355d5ad54f",
-  "package_version": "0.2.4",
+  "runtime_build_id": "tavern-mnemosyne@0.2.5+runtime.48e4eb9066ee1e06",
+  "package_version": "0.2.5",
   "minimum_node_major": 22,
   "entrypoint": "companion-launcher.mjs",
   "archive": "runtime.tar.gz",
-  "archive_sha256": "ae676edd14771bd8bed3e18d35ec572f34da0f836c800f4331498910e120a29c",
-  "archive_bytes": 28374775,
+  "archive_sha256": "a2ef903d99725f3c875f9ca72bf4a50e525080515d12b1871cc45694001714b9",
+  "archive_bytes": 28377847,
   "release_asset": {
     "repository": "winintony/tavern-mnemosyne",
-    "tag": "v0.2.4",
-    "name": "Tavern-Mnemosyne-Runtime-v0.2.4.tar.gz"
+    "tag": "v0.2.5",
+    "name": "Tavern-Mnemosyne-Runtime-v0.2.5.tar.gz"
   },
-  "content_manifest_sha256": "7dd4de355d5ad54f2a7aede78e491bd65e5eec86332c28aba31bafedc8d1614b",
+  "content_manifest_sha256": "48e4eb9066ee1e06238b94facf189fef3f14ee110bd7e09f01060c468ac87b0f",
   "files": [
     {
       "path": "companion-launcher.mjs",
@@ -2551,12 +2551,12 @@
     },
     {
       "path": "package-lock.json",
-      "sha256": "4d074eb8b803ad0003d4c8a85998ccb297a049c3e69a560c29db36aee0b4b8fa",
+      "sha256": "5d1963c8b66849b0894ce829eeeeb02a7965e8ba6e77bd68a2e7b3675ead4ceb",
       "bytes": 1436
     },
     {
       "path": "package.json",
-      "sha256": "1f3a512d9f4bb156bcceb1a9bfbfd9124734526911aa9acc7ce977d9a980edab",
+      "sha256": "193dee9033d2e6b44c8cb956fe9524aca1a2d454e6904bca386dd3b807307352",
       "bytes": 845
     },
     {
@@ -2851,8 +2851,8 @@
     },
     {
       "path": "src/intake/static-lore-extraction-service.js",
-      "sha256": "a466fa1dddf982a091cac0248e19babacc1512269fa1c50f9f6790d5699e82aa",
-      "bytes": 121819
+      "sha256": "620ccfab0900b07c7ac9104f8561253592eeff96cc164519ee7a34c6c2c27677",
+      "bytes": 122549
     },
     {
       "path": "src/intake/static-lore-intake.js",
@@ -2901,18 +2901,23 @@
     },
     {
       "path": "src/proxy/cli.js",
-      "sha256": "761b3f1df6634dffac17f9eeceeacf88c18de7e66c126bb5e1dfcb613d28e395",
-      "bytes": 19920
+      "sha256": "6b4d65f6c61c08d1324d43b85fb91642091e7ca05d331de6fcd8373d44fd300c",
+      "bytes": 20278
     },
     {
       "path": "src/proxy/openai-tool-provider.js",
-      "sha256": "692312d446ac98f0626d6da1fac49b41ba64dfd81ef933235888b829ba1349cd",
-      "bytes": 6263
+      "sha256": "9e9fb18064be89032eebcfbd820eec26754a2ded2ec43947683db8b6f4289097",
+      "bytes": 6440
     },
     {
       "path": "src/proxy/production-story-source-admission.js",
       "sha256": "c43eb06a6128683d622c982c026fb6fcf242e97b841c57573b99161a39c55aa6",
       "bytes": 1800
+    },
+    {
+      "path": "src/proxy/provider-request-compatibility.js",
+      "sha256": "771878726295c69c08455b25c659e3f51a511561c722f980b994455c93940f89",
+      "bytes": 721
     },
     {
       "path": "src/proxy/provider-step-budget.js",

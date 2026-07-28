@@ -109,11 +109,8 @@ import {
     createHistoryLifecycleDurableStore,
 } from './history-lifecycle-durable-store.js';
 import {
-    resolveProvisioningUpstreamUrl,
-} from './provisioning-upstream-url.js';
-import {
-    createAutoIntakeScheduler,
-} from './auto-intake-scheduler.js';
+    createChatSaveInitializationGate,
+} from './chat-save-initialization-gate.js';
 import {
     appendSubjectiveFeedbackNote,
     bindSubjectiveFeedbackNote,
@@ -157,9 +154,11 @@ import {
     createBrowserFolderHandleStore,
 } from './browser-folder-handle-store.js';
 import {
-    captureUpstreamConnectionProfile,
-    restoreUpstreamConnectionProfile,
-} from './connection-profile-protection.js';
+    createUpstreamConnectionLease,
+} from './upstream-connection-lease.js';
+import {
+    classifyIntakeModelFailure,
+} from './upstream-request-binding.js';
 import {
     mergeTransportLeaseIntoCustomBody,
 } from './root-transport-lease.js';
@@ -340,6 +339,7 @@ async function invokeControl(methodName, payload, {
 
 const STATUS_DISPLAY_TEXT = Object.freeze({
     'Ready': '已就绪',
+    'Awaiting first send': '将在首次发送时初始化当前聊天',
     'Disabled': '已关闭',
     'Preparing': '准备中…',
     'Checking': '检查中…',
@@ -360,6 +360,18 @@ const BLOCK_REASON_TEXT = Object.freeze({
     chat_id_missing: '请先打开一个聊天',
     character_missing: '请先打开角色聊天',
     prompt_trace_missing: '提示词轨迹缺失',
+    static_lore_initialization_busy:
+        '正在初始化当前聊天存档，请稍候',
+    static_lore_initialization_incomplete:
+        '当前聊天存档尚未完成初始化，请重试',
+    static_lore_initialization_stalled:
+        '当前聊天存档初始化没有继续推进，请检查连接后重试',
+    static_lore_reconcile_approval_required:
+        '设定变化需要确认合并',
+    upstream_authentication_failed:
+        '当前连接预设的 API 密钥无效或未选中，请重新连接该预设',
+    upstream_model_request_incompatible:
+        '当前模型拒绝了结构化初始化请求，请切换兼容模型后重试',
 });
 
 // Raw status values stay in state for governance logic and contract
@@ -500,10 +512,16 @@ const runActivityController =
         onChange: activityState =>
             syncRunActivityUi(activityState),
     });
-const autoStaticLoreIntakeScheduler =
-    createAutoIntakeScheduler({
+const chatSaveInitializationGate =
+    createChatSaveInitializationGate({
         isEnabled: () => settings().enabled,
-        run: () => autoRunStaticLoreIntake(),
+        initialize: () => autoRunStaticLoreIntake(),
+    });
+const upstreamConnectionLease =
+    createUpstreamConnectionLease({
+        readSettings: settings,
+        readConnectionManager: currentConnectionManager,
+        save: saveSettingsDebounced,
     });
 
 // Floating micro-window state: which verdict/facet is picked before
@@ -1100,42 +1118,10 @@ function currentConnectionManager() {
     return getContext().extensionSettings?.connectionManager ?? null;
 }
 
-function protectedConnectionProfileSnapshot() {
-    const current = settings();
-    if (
-        !current.upstreamConnectionProfileId
-        || !current.upstreamConnectionProfileUrl
-    ) {
-        return null;
-    }
-    return {
-        profileId: current.upstreamConnectionProfileId,
-        upstreamUrl: current.upstreamConnectionProfileUrl,
-    };
-}
-
-function captureCurrentUpstreamConnectionProfile(currentUrl) {
-    const snapshot = captureUpstreamConnectionProfile({
-        connectionManager: currentConnectionManager(),
-        currentUrl,
-        runtimeUrl: configuredRuntimeProxyUrl(),
-    });
-    if (!snapshot) return null;
-    const current = settings();
-    current.upstreamConnectionProfileId = snapshot.profileId;
-    current.upstreamConnectionProfileUrl = snapshot.upstreamUrl;
-    saveSettingsDebounced();
-    return snapshot;
-}
-
 function protectUpstreamConnectionProfile() {
-    const restored = restoreUpstreamConnectionProfile({
-        connectionManager: currentConnectionManager(),
-        snapshot: protectedConnectionProfileSnapshot(),
-        runtimeUrl: configuredRuntimeProxyUrl(),
-    });
-    if (restored) saveSettingsDebounced();
-    return restored;
+    return upstreamConnectionLease.restoreSelectedProfile(
+        configuredRuntimeProxyUrl(),
+    );
 }
 
 function installPreSquashCapture() {
@@ -2357,23 +2343,6 @@ async function issueSourceRemovalGrants(
     );
 }
 
-async function requireUpstreamReadiness() {
-    const body = await invokeControl(
-        'inspectUpstreamReadiness',
-        {},
-    );
-    if (body.status !== 'ready') {
-        const error = new Error(
-            'The configured model deployment is not ready for a paid intake batch.',
-        );
-        error.reasonCode =
-            body?.reason_code
-            ?? 'upstream_deployment_unavailable';
-        throw error;
-    }
-    return body;
-}
-
 function inspectHostSourceRoutes() {
     const fields = getCharacterCardFields();
     return {
@@ -2969,6 +2938,10 @@ async function onGenerationStarted(
         && state.dryCheckPending
         && dryRun === true
     );
+    const joinableStaticLoreInitialization = (
+        state.exclusiveOperation === 'static-lore-intake'
+        && dryRun === false
+    );
     if (dryRun === true && !ownDryCheck) {
         if (!state.activeRunMarker) {
             clearInjections();
@@ -2980,6 +2953,7 @@ async function onGenerationStarted(
     if (
         state.exclusiveOperation !== null
         && !ownDryCheck
+        && !joinableStaticLoreInitialization
     ) {
         state.generationType = nextGenerationType;
         const reasonCode =
@@ -3036,6 +3010,18 @@ async function onGenerationStarted(
             updateStatus(`Blocked: ${pendingHistoryEditReason}`);
         }
         return;
+    }
+
+    if (dryRun === false) {
+        const intakeReason =
+            await ensureStaticLoreReadyForGeneration(
+                historyChatId,
+            );
+        if (intakeReason) {
+            state.generationType = nextGenerationType;
+            blockCurrentGeneration(intakeReason);
+            return;
+        }
     }
     state.generationAbortReason = null;
 
@@ -3592,6 +3578,7 @@ async function onChatChanged() {
         state.generationType = null;
         state.generationAbortReason = null;
         state.blockReason = null;
+        state.preparedIntake = null;
         state.suppressedMessageDeletion = null;
         state.chatSnapshot = [];
         state.chatSnapshotChatId = null;
@@ -3616,11 +3603,11 @@ async function onChatChanged() {
                 ? (
                     state.blockReason
                         ? `Blocked: ${state.blockReason}`
-                        : 'Ready'
+                        : 'Awaiting first send'
                 )
                 : 'Disabled',
         );
-        scheduleAutoStaticLoreIntake(expectedChatId);
+        syncIntakeApprovalUi();
     }, { chatId: expectedChatId });
 }
 
@@ -4090,6 +4077,10 @@ async function onSettingsReady(generateData) {
         blockChatCompletionRequest(generateData, profile.reason_code);
         return;
     }
+    Object.assign(
+        generateData,
+        upstreamConnectionLease.bindHostRequest(generateData),
+    );
     if (!state.promptTraceInputs || !Array.isArray(generateData?.messages)) {
         blockChatCompletionRequest(
             generateData,
@@ -4376,39 +4367,58 @@ function syncIntakeApprovalUi() {
 // Drives the click-step intake state machine to a terminal state:
 // ready, a reconcile waiting for approval, or a repeated failure.
 async function autoRunStaticLoreIntake() {
-    if (state.exclusiveOperation !== null) return 'deferred';
-    let previousStatus = null;
+    if (state.exclusiveOperation !== null) {
+        return { status: 'deferred' };
+    }
     let outcome = 'retryable';
-    for (let step = 0; step < 24; step += 1) {
+    let reasonCode = null;
+    let previousProgress = null;
+    for (let step = 0; step < 2048; step += 1) {
         await runStaticLoreIntake();
         const prepared = state.preparedIntake?.prepared;
         if (!prepared) {
-            outcome = state.status.startsWith('Blocked:')
-                ? 'retryable'
-                : 'complete';
+            const blocked = /^Blocked: (.+)$/.exec(state.status);
+            outcome = blocked ? 'retryable' : 'complete';
+            reasonCode = blocked?.[1] ?? null;
             break;
         }
         if (prepared.status === 'approval_required') {
             outcome = 'waiting_for_approval';
             break;
         }
-        if (prepared.status === 'reconcile_blocked') break;
-        if (
-            prepared.status === 'retry_required'
-            && previousStatus === 'retry_required'
-        ) {
+        if (prepared.status === 'reconcile_blocked') {
+            reasonCode =
+                prepared.reason_code
+                ?? 'static_lore_reconcile_blocked';
             break;
         }
-        previousStatus = prepared.status;
+        const progress = JSON.stringify({
+            status: prepared.status,
+            snapshotId: prepared.snapshot_id ?? null,
+            requestId: prepared.request_id ?? null,
+            batchIndex: prepared.batch_index ?? null,
+            batchAttempt: prepared.batch_attempt ?? null,
+            planId: prepared.reconcile_plan_id ?? null,
+        });
+        if (progress === previousProgress) {
+            reasonCode = 'static_lore_initialization_stalled';
+            break;
+        }
+        previousProgress = progress;
+        if (step === 2047) {
+            reasonCode = 'static_lore_initialization_stalled';
+        }
     }
     syncIntakeApprovalUi();
-    return outcome;
+    return { status: outcome, reasonCode };
 }
 
-function scheduleAutoStaticLoreIntake(chatId, {
-    force = false,
-} = {}) {
-    void autoStaticLoreIntakeScheduler.schedule(chatId, { force });
+async function ensureStaticLoreReadyForGeneration(chatId) {
+    const result =
+        await chatSaveInitializationGate.ensureForSend(chatId);
+    return result.status === 'ready'
+        ? null
+        : result.reasonCode;
 }
 
 async function applyPendingIntakeReconcile() {
@@ -4767,11 +4777,6 @@ async function runStaticLoreIntake() {
         state.preparedIntake = refreshedIntake;
         const stablePrepared = refreshedIntake.prepared;
         const intakeControlLease = refreshedIntake.controlLease;
-        updateStatus('Checking model deployment');
-        await currentControlClient().inspectUpstreamReadiness(
-            {},
-            { lease: intakeControlLease },
-        );
         updateStatus(
             `设定导入模型调用：批次 ${stablePrepared.batch_index}/`
             + `${stablePrepared.batch_count}（`
@@ -4779,27 +4784,31 @@ async function runStaticLoreIntake() {
         );
         state.preparedIntake = null;
         const modelRequest = stablePrepared.model_request;
+        const hostRequest =
+            upstreamConnectionLease.bindHostRequest({
+                chat_completion_source: 'custom',
+                custom_url:
+                    `${safeProxyBaseUrl()}/v1/mnemosyne/intake`,
+                custom_include_body: JSON.stringify({
+                    mnemosyne_intake_request_id:
+                        stablePrepared.request_id,
+                    mnemosyne_intake_execution_lease:
+                        stablePrepared.intake_execution_lease,
+                }),
+                custom_exclude_body: '',
+                custom_include_headers: JSON.stringify({
+                    'x-mnemosyne-intake-capability':
+                        stablePrepared.intake_capability,
+                }),
+                custom_prompt_post_processing: '',
+                ...modelRequest,
+            });
         const completionResponse = await fetch(
             '/api/backends/chat-completions/generate',
             {
                 method: 'POST',
                 headers: context.getRequestHeaders(),
-                body: JSON.stringify({
-                    chat_completion_source: 'custom',
-                    custom_url: `${safeProxyBaseUrl()}/v1/mnemosyne/intake`,
-                    custom_include_body: JSON.stringify({
-                        mnemosyne_intake_request_id: stablePrepared.request_id,
-                        mnemosyne_intake_execution_lease:
-                            stablePrepared.intake_execution_lease,
-                    }),
-                    custom_exclude_body: '',
-                    custom_include_headers: JSON.stringify({
-                        'x-mnemosyne-intake-capability':
-                            stablePrepared.intake_capability,
-                    }),
-                    custom_prompt_post_processing: '',
-                    ...modelRequest,
-                }),
+                body: JSON.stringify(hostRequest),
             },
         );
         const completion = await completionResponse.json();
@@ -4818,9 +4827,11 @@ async function runStaticLoreIntake() {
                 completion?.error?.message
                 ?? `Static Lore model call failed with status ${completionResponse.status}.`,
             );
-            error.reasonCode =
-                completion?.error?.reason_code
-                ?? 'static_lore_intake_model_failed';
+            error.reasonCode = classifyIntakeModelFailure({
+                responseOk: completionResponse.ok,
+                responseStatus: completionResponse.status,
+                completion,
+            });
             throw error;
         }
         const result = completion.mnemosyne_intake_result;
@@ -4879,12 +4890,9 @@ async function resolveCurrentProvisioningUpstreamUrl(
     presetCustomUrl,
     rootHandle,
 ) {
-    captureCurrentUpstreamConnectionProfile(presetCustomUrl);
-    let resolution;
     try {
-        resolution = resolveProvisioningUpstreamUrl({
+        return upstreamConnectionLease.resolveForProvisioning({
             currentUrl: presetCustomUrl,
-            persistedUrl: settings().upstreamCustomUrl,
             runtimeUrl: configuredRuntimeProxyUrl(),
         });
     } catch (error) {
@@ -4897,18 +4905,12 @@ async function resolveCurrentProvisioningUpstreamUrl(
         }
         const installed =
             await readInstalledBrowserFolderRuntimeConfig(rootHandle);
-        resolution = resolveProvisioningUpstreamUrl({
+        return upstreamConnectionLease.resolveForProvisioning({
             currentUrl: presetCustomUrl,
-            persistedUrl: settings().upstreamCustomUrl,
             installedRuntimeUrl: installed?.upstreamBaseUrl,
             runtimeUrl: configuredRuntimeProxyUrl(),
         });
     }
-    if (resolution.snapshotUrl !== null) {
-        settings().upstreamCustomUrl = resolution.snapshotUrl;
-        saveSettingsDebounced();
-    }
-    return resolution.upstreamUrl;
 }
 
 async function browserFolderProvisioningInput({
@@ -5047,13 +5049,10 @@ function settleProvisioningReady({
     saveSettingsDebounced();
     const enabled = document.querySelector('#tavern_mnemosyne_enabled');
     if (enabled) enabled.checked = true;
-    statusElement.textContent = 'Mnemosyne 已就绪。';
+    statusElement.textContent =
+        '运行组件已就绪；当前聊天将在首次发送时初始化。';
     statusElement.dataset.kind = 'ok';
-    updateStatus('Ready');
-    scheduleAutoStaticLoreIntake(
-        getContext().chatId ?? null,
-        { force: true },
-    );
+    updateStatus('Awaiting first send');
 }
 
 async function resumeProvisioningVerification({
