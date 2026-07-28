@@ -367,6 +367,7 @@ export function createMnemosyneSillyTavernBridge({
       upstream_reachable: health.upstream_reachable ?? 'unknown',
       main_host_binding: health.main_host_binding ?? null,
       provider_budget_policy: health.provider_budget_policy ?? null,
+      generation_base_url: `${baseUrl}/v1`,
       operations: operationCapabilityList({
         includeEvaluation: enableEvaluationRoutes,
       }),

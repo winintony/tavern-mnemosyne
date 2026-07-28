@@ -154,6 +154,9 @@ import {
     createProvisioningOrchestrator,
 } from './provisioning-orchestrator.js';
 import {
+    createBrowserFolderHandleStore,
+} from './browser-folder-handle-store.js';
+import {
     captureUpstreamConnectionProfile,
     restoreUpstreamConnectionProfile,
 } from './connection-profile-protection.js';
@@ -179,6 +182,8 @@ const DEFAULT_SETTINGS = Object.freeze({
     upstreamConnectionProfileId: '',
     upstreamConnectionProfileUrl: '',
 });
+
+const browserFolderHandleStore = createBrowserFolderHandleStore();
 
 const state = {
     runId: null,
@@ -257,6 +262,13 @@ function settings() {
         }
     }
     return extension_settings[MODULE_NAME];
+}
+
+function configuredRuntimeProxyUrl() {
+    const baseUrl = normalizeLoopbackProxyBaseUrl(
+        settings().proxyBaseUrl || DEFAULT_SETTINGS.proxyBaseUrl,
+    );
+    return `${baseUrl}/v1`;
 }
 
 function proxyUrl(pathname) {
@@ -1106,7 +1118,7 @@ function captureCurrentUpstreamConnectionProfile(currentUrl) {
     const snapshot = captureUpstreamConnectionProfile({
         connectionManager: currentConnectionManager(),
         currentUrl,
-        runtimeUrl: localRuntimeProxyUrl(),
+        runtimeUrl: configuredRuntimeProxyUrl(),
     });
     if (!snapshot) return null;
     const current = settings();
@@ -1120,7 +1132,7 @@ function protectUpstreamConnectionProfile() {
     const restored = restoreUpstreamConnectionProfile({
         connectionManager: currentConnectionManager(),
         snapshot: protectedConnectionProfileSnapshot(),
-        runtimeUrl: localRuntimeProxyUrl(),
+        runtimeUrl: configuredRuntimeProxyUrl(),
     });
     if (restored) saveSettingsDebounced();
     return restored;
@@ -4873,7 +4885,7 @@ async function resolveCurrentProvisioningUpstreamUrl(
         resolution = resolveProvisioningUpstreamUrl({
             currentUrl: presetCustomUrl,
             persistedUrl: settings().upstreamCustomUrl,
-            runtimeUrl: localRuntimeProxyUrl(),
+            runtimeUrl: configuredRuntimeProxyUrl(),
         });
     } catch (error) {
         if (
@@ -4889,7 +4901,7 @@ async function resolveCurrentProvisioningUpstreamUrl(
             currentUrl: presetCustomUrl,
             persistedUrl: settings().upstreamCustomUrl,
             installedRuntimeUrl: installed?.upstreamBaseUrl,
-            runtimeUrl: localRuntimeProxyUrl(),
+            runtimeUrl: configuredRuntimeProxyUrl(),
         });
     }
     if (resolution.snapshotUrl !== null) {
@@ -4975,18 +4987,14 @@ function currentProvisioningOrchestrator() {
             typeof globalThis.showDirectoryPicker === 'function'
                 ? options => globalThis.showDirectoryPicker(options)
                 : undefined,
+        loadSavedDirectoryHandle: () => browserFolderHandleStore.load(),
+        saveDirectoryHandle: handle =>
+            browserFolderHandleStore.save(handle),
+        clearSavedDirectoryHandle: () =>
+            browserFolderHandleStore.clear(),
         controlClient: currentControlClient(),
         loadBrowserFolderInput: browserFolderProvisioningInput,
     });
-}
-
-function renderProvisioningPlan(plan, element) {
-    if (!element) return;
-    element.hidden = false;
-    element.textContent = [
-        `将修改 ${plan.modified_files.length} 个精确文件：`,
-        ...plan.modified_files,
-    ].join('\n');
 }
 
 function bindProvisionedGenerationEndpoint(lease) {
@@ -5004,7 +5012,7 @@ function bindProvisionedGenerationEndpoint(lease) {
         error.reasonCode = 'main_host_binding_unavailable';
         throw error;
     }
-    const runtimeUrl = localRuntimeProxyUrl();
+    const runtimeUrl = capabilities.generation_base_url;
     protectUpstreamConnectionProfile();
     settings().proxyBaseUrl = runtimeUrl.replace(/\/v1$/, '');
     oai_settings.chat_completion_source = 'custom';
@@ -5029,7 +5037,6 @@ function bindProvisionedGenerationEndpoint(lease) {
 
 function settleProvisioningReady({
     statusElement,
-    button,
     lease,
 }) {
     bindProvisionedGenerationEndpoint(lease);
@@ -5042,8 +5049,6 @@ function settleProvisioningReady({
     if (enabled) enabled.checked = true;
     statusElement.textContent = 'Mnemosyne 已就绪。';
     statusElement.dataset.kind = 'ok';
-    button.textContent = '已启用';
-    button.disabled = true;
     updateStatus('Ready');
     scheduleAutoStaticLoreIntake(
         getContext().chatId ?? null,
@@ -5053,54 +5058,64 @@ function settleProvisioningReady({
 
 async function resumeProvisioningVerification({
     statusElement,
-    button,
 }) {
     const current = settings();
-    if (!current.provisioningPending && !current.enabled) return;
     const pendingRestart = current.provisioningPending;
+    const enableRequested = pendingRestart || current.enabled;
     statusElement.textContent = pendingRestart
         ? '等待 SillyTavern 重启；重启后会自动完成健康验证。'
-        : '正在恢复已启用的运行时绑定…';
+        : '正在自动检查运行状态…';
     statusElement.dataset.kind = 'pending';
     try {
         const inspected =
             await currentProvisioningOrchestrator().inspect();
         if (inspected.status === 'ready') {
+            if (enableRequested) {
+                settleProvisioningReady({
+                    statusElement,
+                    lease: inspected.lease,
+                });
+            } else {
+                statusElement.textContent =
+                    '运行组件已部署；运行开关当前关闭。';
+                statusElement.dataset.kind = 'ok';
+            }
+            return;
+        }
+        if (!pendingRestart) {
+            if (current.enabled) {
+                current.enabled = false;
+                const enabled =
+                    document.querySelector('#tavern_mnemosyne_enabled');
+                if (enabled) enabled.checked = false;
+                saveSettingsDebounced();
+            }
+            statusElement.textContent =
+                '尚未部署；打开运行开关会自动完成部署。';
+            statusElement.dataset.kind = 'idle';
+            updateStatus('Disabled');
+            return;
+        }
+        void currentProvisioningOrchestrator().verify({
+            timeoutMs: 10 * 60 * 1_000,
+            intervalMs: 2_000,
+        }).then(verified => {
+            if (!settings().provisioningPending) return;
             settleProvisioningReady({
                 statusElement,
-                button,
-                lease: inspected.lease,
+                lease: verified.lease,
             });
-            return;
-        }
-        const reason = {
-            reasonCode:
-                inspected.prior_error
-                ?? inspected.reason_code
-                ?? 'mnemosyne_loopback_unavailable',
-        };
-        statusElement.textContent = pendingRestart
-            ? [
-                '尚未检测到本机运行时。',
-                '请先重启 SillyTavern；若已重启，请点“重新检查或修复”。',
-            ].join('')
-            : `运行时不可用：${provisioningFailureText(reason)}`;
-        statusElement.dataset.kind = pendingRestart
-            ? 'pending'
-            : 'error';
-        button.textContent = '重新检查或修复';
-        button.disabled = false;
-        updateStatus('Unavailable');
+        }).catch(() => {
+            if (!settings().provisioningPending) return;
+            statusElement.textContent =
+                '等待 SillyTavern 重启；重启后会继续自动检查。';
+            statusElement.dataset.kind = 'pending';
+        });
     } catch (error) {
-        if (pendingRestart) {
-            // A pending install remains pending until the bridge is healthy.
-            return;
-        }
-        statusElement.textContent =
-            `恢复绑定失败：${provisioningFailureText(error)}`;
+        statusElement.textContent = pendingRestart
+            ? '等待 SillyTavern 重启；重启后会继续自动检查。'
+            : `自动检查失败：${provisioningFailureText(error)}`;
         statusElement.dataset.kind = 'error';
-        button.textContent = '重新检查或修复';
-        button.disabled = false;
         updateStatus('Unavailable');
     }
 }
@@ -5120,6 +5135,8 @@ const PROVISIONING_ERROR_MESSAGES = Object.freeze({
         '无法确认 SillyTavern 版本，请刷新页面后重试。',
     browser_folder_artifact_unavailable:
         '扩展安装包不完整，请重新安装扩展后重试。',
+    browser_folder_extension_install_not_found:
+        '所选文件夹中没有当前扩展。请确认选择的是正在运行的 SillyTavern 根文件夹。',
     browser_folder_runtime_config_invalid:
         '现有运行时配置已损坏。请在 API 连接页重新填写上游地址后重试。',
     mnemosyne_provisioning_unsupported:
@@ -5132,6 +5149,15 @@ const PROVISIONING_ERROR_MESSAGES = Object.freeze({
 
 function provisioningFailureText(error) {
     if (error?.name === 'AbortError') return '已取消。';
+    if (error?.name === 'NotFoundError') {
+        return '安装目录内容不完整或已移动。请重新打开运行开关并选择当前 SillyTavern 文件夹。';
+    }
+    if (
+        error?.name === 'NotAllowedError'
+        || error?.name === 'SecurityError'
+    ) {
+        return '浏览器没有获得文件夹读写权限。请重新打开运行开关并允许访问。';
+    }
     const message = PROVISIONING_ERROR_MESSAGES[error?.reasonCode];
     if (message) return message;
     console.error('[Mnemosyne] provisioning failed', error);
@@ -5140,18 +5166,14 @@ function provisioningFailureText(error) {
 
 async function enableMnemosyneFromProvisioningCard({
     statusElement,
-    planElement,
-    button,
 }) {
-    button.disabled = true;
     statusElement.dataset.kind = 'pending';
-    statusElement.textContent = '正在检查部署能力…';
+    statusElement.textContent = '正在自动检查并准备运行组件…';
     try {
         const result = await currentProvisioningOrchestrator().enable({
-            onPlan: async plan => {
+            onPlan: async () => {
                 statusElement.textContent =
                     '已验证目录，正在写入自包含运行时…';
-                renderProvisioningPlan(plan, planElement);
                 await new Promise(resolve => {
                     globalThis.requestAnimationFrame?.(
                         () => resolve(),
@@ -5162,7 +5184,6 @@ async function enableMnemosyneFromProvisioningCard({
         if (result.status === 'ready') {
             settleProvisioningReady({
                 statusElement,
-                button,
                 lease: result.lease,
             });
             return;
@@ -5172,50 +5193,37 @@ async function enableMnemosyneFromProvisioningCard({
                 `Unexpected provisioning status: ${result.status}`,
             );
         }
-        settings().proxyBaseUrl =
-            localRuntimeProxyUrl().replace(/\/v1$/, '');
         settings().sessionToken = '';
         settings().enabled = false;
         settings().provisioningPending = true;
-        protectUpstreamConnectionProfile();
-        oai_settings.custom_url = localRuntimeProxyUrl();
         saveSettingsDebounced();
         statusElement.textContent =
             '安装完成。请重启一次 SillyTavern；本页会自动检测。';
         statusElement.dataset.kind = 'pending';
-        button.textContent = '等待重启';
         void currentProvisioningOrchestrator().verify({
             timeoutMs: 10 * 60 * 1_000,
             intervalMs: 2_000,
         }).then(verified => {
             settleProvisioningReady({
                 statusElement,
-                button,
                 lease: verified.lease,
             });
         }).catch(() => {
             statusElement.textContent =
-                '尚未检测到健康运行时；请完成 SillyTavern 重启。';
-            statusElement.dataset.kind = 'error';
-            button.textContent = '重新检查或修复';
-            button.disabled = false;
+                '等待 SillyTavern 重启；重启后会继续自动检查。';
+            statusElement.dataset.kind = 'pending';
         });
     } catch (error) {
         statusElement.textContent =
             `启用失败：${provisioningFailureText(error)}`;
-        if (error.recovery && planElement) {
-            planElement.hidden = false;
-            planElement.textContent = [
-                '安装未完成，请勿重启 SillyTavern。',
-                `恢复记录：${error.recovery.failure_receipt}`,
-                `配置备份目录：${
-                    error.recovery.config_backup_directory
-                }`,
-                '排除磁盘空间、权限或并发修改问题后，回到此卡片重试。',
-            ].join('\n');
-        }
         statusElement.dataset.kind = 'error';
-        button.disabled = false;
+        const current = settings();
+        current.enabled = false;
+        current.provisioningPending = false;
+        const enabled =
+            document.querySelector('#tavern_mnemosyne_enabled');
+        if (enabled) enabled.checked = false;
+        saveSettingsDebounced();
     }
 }
 
@@ -5233,28 +5241,15 @@ function addSettingsUi() {
             </div>
             <div class="inline-drawer-content">
                 <div class="mnemosyne-provisioning-panel">
-                    <b>部署与启用</b>
+                    <b>运行与部署</b>
                     <small>
-                        云端预装版会直接激活；本机 Chromium 会显示浏览器原生
-                        目录读写授权，并在你选择 SillyTavern 文件夹后完成安装。
-                        不需要下载、解压、终端命令或单独安装 Companion。
+                        首次部署时请打开运行开关，并在弹窗中选择
+                        SillyTavern 安装目录。插件会自动完成部署和后续检查。
                     </small>
-                    <button
-                        id="tavern_mnemosyne_enable"
-                        class="menu_button"
-                        type="button"
-                    >启用 Mnemosyne</button>
                     <span
                         id="tavern_mnemosyne_provisioning_status"
                         class="mnemosyne-provisioning-status"
-                    >尚未检查部署能力。</span>
-                    <details class="mnemosyne-provisioning-plan">
-                        <summary>查看安装将修改的精确文件</summary>
-                        <pre
-                            id="tavern_mnemosyne_provisioning_files"
-                            hidden
-                        ></pre>
-                    </details>
+                    >正在自动检查运行状态…</span>
                 </div>
                 <label class="checkbox_label">
                     <input id="tavern_mnemosyne_enabled" type="checkbox">
@@ -5353,16 +5348,11 @@ function addSettingsUi() {
     const feedbackEnabled = container.querySelector(
         '#tavern_mnemosyne_feedback_enabled',
     );
-    const provisioningButton = container.querySelector(
-        '#tavern_mnemosyne_enable',
-    );
     const provisioningStatus = container.querySelector(
         '#tavern_mnemosyne_provisioning_status',
     );
-    const provisioningFiles = container.querySelector(
-        '#tavern_mnemosyne_provisioning_files',
-    );
-    enabled.checked = current.enabled;
+    enabled.checked =
+        current.enabled || current.provisioningPending;
     proxyBaseUrl.value = current.proxyBaseUrl;
     sessionToken.value = current.sessionToken;
     feedbackEnabled.checked =
@@ -5373,17 +5363,22 @@ function addSettingsUi() {
     );
 
     enabled.addEventListener('change', () => {
-        current.enabled = enabled.checked;
-        if (!current.enabled) {
+        if (!enabled.checked) {
+            current.enabled = false;
+            current.provisioningPending = false;
             clearInjections();
             updateStatus('Disabled');
+            provisioningStatus.textContent =
+                '运行开关已关闭；自动检查不会修改部署。';
+            provisioningStatus.dataset.kind = 'idle';
+            saveSettingsDebounced();
         } else {
-            scheduleAutoStaticLoreIntake(
-                getContext().chatId ?? null,
-                { force: true },
-            );
+            current.enabled = false;
+            saveSettingsDebounced();
+            void enableMnemosyneFromProvisioningCard({
+                statusElement: provisioningStatus,
+            });
         }
-        saveSettingsDebounced();
     });
     proxyBaseUrl.addEventListener('input', () => {
         current.proxyBaseUrl = proxyBaseUrl.value.trim();
@@ -5401,16 +5396,8 @@ function addSettingsUi() {
         );
         saveSettingsDebounced();
     });
-    provisioningButton.addEventListener('click', () => {
-        void enableMnemosyneFromProvisioningCard({
-            statusElement: provisioningStatus,
-            planElement: provisioningFiles,
-            button: provisioningButton,
-        });
-    });
     void resumeProvisioningVerification({
         statusElement: provisioningStatus,
-        button: provisioningButton,
     });
     container.querySelector('#tavern_mnemosyne_intake_apply')
         ?.addEventListener('click', () => {

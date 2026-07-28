@@ -635,6 +635,10 @@ const proxy = createMnemosyneProxy({
 });
 
 const url = await proxy.listen({ host, port });
+process.send?.({
+  schema: 'mnemosyne.runtime-ready.v1',
+  url,
+});
 
 async function shutdown() {
   await proxy.close();

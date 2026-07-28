@@ -56,8 +56,10 @@ Release assets include two M-P1 profiles:
   passed the required real-cluster acceptance in the target environment.
 
 In both profiles, the browser uses an authenticated same-origin SillyTavern
-bridge and SillyTavern's Node backend sends generation to loopback. Port 18991
-is never public. See the cloud deployment README included in the Release.
+bridge and SillyTavern's Node backend sends generation to an automatically
+assigned loopback port. The actual address is discovered through the same-origin
+bridge, so local port conflicts do not require user action and the runtime is
+never public. See the cloud deployment README included in the Release.
 
 The cloud profile is one trusted data domain. It does not isolate mutually
 untrusted SillyTavern accounts and must not be exposed as a public multi-tenant
@@ -67,8 +69,9 @@ service.
 
 The per-platform standalone Companion archives and macOS installer remain
 advanced recovery/legacy paths. They are not the recommended local setup.
-They carry the same release version and keep the Companion on
-`127.0.0.1:18991`. Never expose that port to a LAN or the Internet.
+They carry the same release version and keep the Companion on `127.0.0.1`;
+standalone operators may choose the port with `MNEMOSYNE_PORT`. Never expose
+the runtime to a LAN or the Internet.
 
 Firefox, Safari, an existing remote/NAS SillyTavern without a preinstalled
 bridge, Termux, and TauriTavern are not covered by the two supported profiles.

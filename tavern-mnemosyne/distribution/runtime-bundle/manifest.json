@@ -1,18 +1,18 @@
 {
   "schema": "mnemosyne.self-contained-runtime-bundle.v1",
-  "runtime_build_id": "tavern-mnemosyne@0.2.2+runtime.0798288ce51ffcdb",
-  "package_version": "0.2.2",
+  "runtime_build_id": "tavern-mnemosyne@0.2.3+runtime.78d43a54a3520212",
+  "package_version": "0.2.3",
   "minimum_node_major": 22,
   "entrypoint": "companion-launcher.mjs",
   "archive": "runtime.tar.gz",
-  "archive_sha256": "bb3b6178dc051d7504f6e12139c73a44e647afb84d835664c6818f545218c5ad",
-  "archive_bytes": 28310765,
+  "archive_sha256": "5b009eb5b76218f40c1d9a543595cbba65e227ff843b3dc3346bbf54980b030f",
+  "archive_bytes": 28312301,
   "release_asset": {
     "repository": "winintony/tavern-mnemosyne",
-    "tag": "v0.2.2",
-    "name": "Tavern-Mnemosyne-Runtime-v0.2.2.tar.gz"
+    "tag": "v0.2.3",
+    "name": "Tavern-Mnemosyne-Runtime-v0.2.3.tar.gz"
   },
-  "content_manifest_sha256": "0798288ce51ffcdb34892fa529ff08e2e2d5cd910d07499f979ef98a57bf0ade",
+  "content_manifest_sha256": "78d43a54a3520212f4e23f70491d1bba8591a77a66875ae0c2e91a30d0855aa3",
   "files": [
     {
       "path": "companion-launcher.mjs",
@@ -21,8 +21,8 @@
     },
     {
       "path": "distribution/server-plugin/index.mjs",
-      "sha256": "becaeaa8b04ca2e2bae396312c14032261c1ef6323dba62044b5636feb405b87",
-      "bytes": 3925
+      "sha256": "ea5ec864164a06cc9326a81dc5b693fb736871403a42a4af32c6afa250ee95e8",
+      "bytes": 5475
     },
     {
       "path": "node_modules/.bin/yaml",
@@ -2551,12 +2551,12 @@
     },
     {
       "path": "package-lock.json",
-      "sha256": "eccfc501e20a0b2de8b526d4ee1e6ef9625338d679fd6d12dda35bdef2fb03aa",
+      "sha256": "a091cdb5fb7b474835ca6fb390e26046ad29d40c3d5cfcec36b46e61aa0faddd",
       "bytes": 1436
     },
     {
       "path": "package.json",
-      "sha256": "7122327bb8d154b48c55c34f8099123e640a803e44358199577ed89fee0cae35",
+      "sha256": "d2f826875e4220b6d2a8efca2f6b6840e740df3fccb07de921a331f38b1c9f0f",
       "bytes": 845
     },
     {
@@ -2606,8 +2606,8 @@
     },
     {
       "path": "src/control/sillytavern-bridge.js",
-      "sha256": "6024768d6eb5b616f9a12f210f472f76aa7d615e1ae8af9563bbe2b8a46b8da9",
-      "bytes": 14602
+      "sha256": "4e51418c3b5f34a2b2dcc6b543dd7f0def7b80192f0651571ef6dfa5a7d589b4",
+      "bytes": 14646
     },
     {
       "path": "src/craft/active-lane-bodies.js",
@@ -2871,8 +2871,8 @@
     },
     {
       "path": "src/proxy/cli.js",
-      "sha256": "ddf85d7f7adeb4940ef12aca2e3b2e47c4ef07a965a3a99d3f195c7b228390ea",
-      "bytes": 19852
+      "sha256": "761b3f1df6634dffac17f9eeceeacf88c18de7e66c126bb5e1dfcb613d28e395",
+      "bytes": 19920
     },
     {
       "path": "src/proxy/openai-tool-provider.js",

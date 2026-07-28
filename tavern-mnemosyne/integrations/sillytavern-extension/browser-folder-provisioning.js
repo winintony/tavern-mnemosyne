@@ -5,22 +5,24 @@ export const BROWSER_FOLDER_PATHS = Object.freeze({
     package: 'package.json',
     config: 'config.yaml',
     codeRoot: 'data/default-user/extensions/tavern-mnemosyne',
-    codeManifest:
-        'data/default-user/extensions/tavern-mnemosyne/manifest.json',
+    codeManifest: 'data/default-user/extensions/tavern-mnemosyne/manifest.json',
     extensionManifest:
         'data/default-user/extensions/tavern-mnemosyne/'
-        + 'tavern-mnemosyne/integrations/sillytavern-extension/'
-        + 'manifest.json',
+        + 'tavern-mnemosyne/integrations/sillytavern-extension/manifest.json',
     runtimeManifest:
         'data/default-user/extensions/tavern-mnemosyne/'
-        + 'tavern-mnemosyne/distribution/runtime-bundle/'
-        + 'manifest.json',
+        + 'tavern-mnemosyne/distribution/runtime-bundle/manifest.json',
     stub: 'plugins/tavern-mnemosyne/index.mjs',
     binding: 'plugins/tavern-mnemosyne/binding.json',
     stateRoot: 'data/_mnemosyne',
     runtimeConfig: 'data/_mnemosyne/config/runtime.json',
     installRoot: 'data/_mnemosyne/install',
 });
+
+export const BROWSER_FOLDER_CODE_ROOTS = Object.freeze([
+    BROWSER_FOLDER_PATHS.codeRoot,
+    'public/scripts/extensions/third-party/tavern-mnemosyne',
+]);
 
 const SAFE_BUILD_ID = /^[A-Za-z0-9@._+-]{1,160}$/;
 const MANIFEST_SCHEMA =
@@ -158,6 +160,61 @@ async function readFileBytes(root, relativePath) {
 
 async function readFileText(root, relativePath) {
     return TEXT_DECODER.decode(await readFileBytes(root, relativePath));
+}
+
+function codeLayout(codeRoot) {
+    return Object.freeze({
+        codeRoot,
+        codeManifest: `${codeRoot}/manifest.json`,
+        extensionManifest:
+            `${codeRoot}/tavern-mnemosyne/integrations/`
+            + 'sillytavern-extension/manifest.json',
+        runtimeManifest:
+            `${codeRoot}/tavern-mnemosyne/distribution/`
+            + 'runtime-bundle/manifest.json',
+    });
+}
+
+async function discoverUserExtensionRoots(rootHandle) {
+    const roots = [];
+    let dataDirectory;
+    try {
+        dataDirectory = await rootHandle.getDirectoryHandle('data');
+    } catch (error) {
+        if (error?.name === 'NotFoundError') return roots;
+        throw error;
+    }
+    if (typeof dataDirectory.values !== 'function') return roots;
+    for await (const entry of dataDirectory.values()) {
+        if (
+            entry?.kind === 'directory'
+            && typeof entry.name === 'string'
+            && entry.name
+        ) {
+            roots.push(`data/${entry.name}/extensions/tavern-mnemosyne`);
+        }
+    }
+    return roots;
+}
+
+async function resolveInstalledCodeLayout(rootHandle) {
+    const candidates = [
+        ...BROWSER_FOLDER_CODE_ROOTS,
+        ...await discoverUserExtensionRoots(rootHandle),
+    ];
+    for (const codeRoot of new Set(candidates)) {
+        const layout = codeLayout(codeRoot);
+        try {
+            await readFileBytes(rootHandle, layout.codeManifest);
+            return layout;
+        } catch (error) {
+            if (error?.name !== 'NotFoundError') throw error;
+        }
+    }
+    throw provisioningError(
+        'browser_folder_extension_install_not_found',
+        'The selected SillyTavern folder does not contain this installed extension.',
+    );
 }
 
 async function writeFileVerified(root, relativePath, content) {
@@ -503,7 +560,7 @@ export function createBrowserFolderRuntimeConfig({
     return Object.freeze({
         schema: 'mnemosyne.runtime-config.v1',
         host: '127.0.0.1',
-        port: 18991,
+        port: 0,
         upstreamBaseUrl: parsedUrl.href.replace(/\/+$/, ''),
         upstreamModel: model,
         upstreamAuthMode: 'passthrough',
@@ -565,10 +622,11 @@ async function validateSelectedRoot({
         BROWSER_FOLDER_PATHS.config,
     );
     rewriteServerPluginConfig(configSource);
+    const codeLayout = await resolveInstalledCodeLayout(rootHandle);
     const codeManifest = parseJson(
         await readFileText(
             rootHandle,
-            BROWSER_FOLDER_PATHS.codeManifest,
+            codeLayout.codeManifest,
         ),
         'browser_folder_code_manifest_invalid',
         'The installed extension manifest',
@@ -576,7 +634,7 @@ async function validateSelectedRoot({
     const extensionManifest = parseJson(
         await readFileText(
             rootHandle,
-            BROWSER_FOLDER_PATHS.extensionManifest,
+            codeLayout.extensionManifest,
         ),
         'browser_folder_extension_manifest_invalid',
         'The Mnemosyne extension manifest',
@@ -595,7 +653,7 @@ async function validateSelectedRoot({
     }
     const runtimeManifestBytes = await readFileBytes(
         rootHandle,
-        BROWSER_FOLDER_PATHS.runtimeManifest,
+        codeLayout.runtimeManifest,
     );
     const runtimeManifest = parseJson(
         TEXT_DECODER.decode(runtimeManifestBytes),
@@ -611,6 +669,7 @@ async function validateSelectedRoot({
     return Object.freeze({
         packageJson,
         configSource,
+        codeLayout,
         codeManifest,
         runtimeManifest,
         runtimeManifestBytes,
@@ -757,7 +816,7 @@ export async function provisionBrowserFolder({
         const configHash = await sha256Hex(validated.configSource);
         const binding = Object.freeze({
             schema: BINDING_SCHEMA,
-            relative_code_root: BROWSER_FOLDER_PATHS.codeRoot,
+            relative_code_root: validated.codeLayout.codeRoot,
             extension_version: validated.codeManifest.version,
             runtime_build_id:
                 validated.runtimeManifest.runtime_build_id,

@@ -84,6 +84,12 @@ async function readJson(response) {
 }
 
 function assertCapabilities(capabilities) {
+  let generationBaseUrl;
+  try {
+    generationBaseUrl = new URL(capabilities?.generation_base_url);
+  } catch {
+    generationBaseUrl = null;
+  }
   if (
     capabilities?.schema !== 'mnemosyne.bridge-capabilities.v1'
     || typeof capabilities.runtime_build_id !== 'string'
@@ -96,6 +102,13 @@ function assertCapabilities(capabilities) {
     || !/^[a-f0-9]{64}$/.test(
       capabilities.operation_registry_hash,
     )
+    || generationBaseUrl?.protocol !== 'http:'
+    || !LOOPBACK_HOSTS.has(generationBaseUrl?.hostname)
+    || !generationBaseUrl?.port
+    || generationBaseUrl.username
+    || generationBaseUrl.password
+    || generationBaseUrl.search
+    || generationBaseUrl.hash
   ) {
     fail(
       'mnemosyne_capabilities_invalid',
@@ -237,7 +250,7 @@ async function sha256Hex(value) {
     .join('');
 }
 
-async function loopbackCapabilities(health) {
+async function loopbackCapabilities(health, loopbackBaseUrl) {
   const includeEvaluation =
     health.continuity_evaluation?.status === 'ready';
   const expectedRegistryHash = await sha256Hex(
@@ -259,6 +272,7 @@ async function loopbackCapabilities(health) {
     storage_status: health.storage_status ?? 'unknown',
     upstream_status: health.upstream_status ?? 'unknown',
     upstream_reachable: health.upstream_reachable ?? 'unknown',
+    generation_base_url: new URL('/v1', loopbackBaseUrl).href,
     operations: Object.values(controlOperationRegistry({
       includeEvaluation,
     })),
@@ -371,6 +385,7 @@ export function createMnemosyneControlClient({
     }
     const capabilities = await loopbackCapabilities(
       await readJson(loopbackResponse),
+      resolvedLoopbackUrl,
     );
     assertCapabilities(capabilities);
     const lease = leaseFromCapabilities(capabilities, 'loopback', now);

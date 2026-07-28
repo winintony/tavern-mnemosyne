@@ -62,12 +62,6 @@
   opacity: 0.8;
 }
 
-#tavern_mnemosyne_settings .mnemosyne-provisioning-panel .menu_button {
-  justify-self: start;
-  min-width: 160px;
-  width: auto;
-}
-
 #tavern_mnemosyne_settings .mnemosyne-provisioning-status {
   overflow-wrap: anywhere;
 }
@@ -78,13 +72,6 @@
 
 #tavern_mnemosyne_settings .mnemosyne-provisioning-status[data-kind="error"] {
   color: var(--warning);
-}
-
-#tavern_mnemosyne_settings .mnemosyne-provisioning-plan pre {
-  font-size: 0.78em;
-  max-height: 220px;
-  overflow: auto;
-  white-space: pre-wrap;
 }
 
 #tavern_mnemosyne_settings .mnemosyne-advanced-loopback > summary {

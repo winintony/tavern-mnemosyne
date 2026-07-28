@@ -1,6 +1,6 @@
 import {
     browserFolderEligibility,
-    provisionBrowserFolder,
+    provisionBrowserFolder as provisionBrowserFolderDefault,
 } from './browser-folder-provisioning.js';
 
 function orchestratorError(reasonCode, message, cause) {
@@ -19,8 +19,12 @@ export function createProvisioningOrchestrator({
     pageUrl = globalThis.location?.href,
     secureContext = globalThis.isSecureContext,
     showDirectoryPicker = globalThis.showDirectoryPicker,
+    loadSavedDirectoryHandle = async () => null,
+    saveDirectoryHandle = async () => {},
+    clearSavedDirectoryHandle = async () => {},
     controlClient,
     loadBrowserFolderInput,
+    provisionBrowserFolder = provisionBrowserFolderDefault,
     now,
     randomUUID,
 } = {}) {
@@ -128,29 +132,72 @@ export function createProvisioningOrchestrator({
                 'This SillyTavern deployment has no supported one-action provisioner.',
             );
         }
-        const rootHandle = await showDirectoryPicker({
-            id: 'mnemosyne-st-root',
-            mode: 'readwrite',
-        });
-        if (typeof rootHandle.queryPermission === 'function') {
-            const permission = await rootHandle.queryPermission({
+        const validDirectoryHandle = handle => (
+            handle?.kind === 'directory'
+            && typeof handle.getDirectoryHandle === 'function'
+        );
+        const hasReadWritePermission = async handle => {
+            if (typeof handle.queryPermission !== 'function') return true;
+            let permission = await handle.queryPermission({
                 mode: 'readwrite',
             });
-            if (permission !== 'granted') {
+            if (
+                permission === 'prompt'
+                && typeof handle.requestPermission === 'function'
+            ) {
+                permission = await handle.requestPermission({
+                    mode: 'readwrite',
+                });
+            }
+            return permission === 'granted';
+        };
+        let rootHandle = await loadSavedDirectoryHandle();
+        if (
+            validDirectoryHandle(rootHandle)
+            && !await hasReadWritePermission(rootHandle)
+        ) {
+            await clearSavedDirectoryHandle();
+            rootHandle = null;
+        }
+        if (!validDirectoryHandle(rootHandle)) {
+            rootHandle = await showDirectoryPicker({
+                id: 'mnemosyne-st-root',
+                mode: 'readwrite',
+            });
+            if (
+                !validDirectoryHandle(rootHandle)
+                || !await hasReadWritePermission(rootHandle)
+            ) {
+                await clearSavedDirectoryHandle();
                 throw orchestratorError(
                     'browser_folder_permission_not_granted',
                     'Directory read/write permission was not granted.',
                 );
             }
+            await saveDirectoryHandle(rootHandle);
         }
-        const input = await loadBrowserFolderInput({ rootHandle });
-        const receipt = await provisionBrowserFolder({
-            rootHandle,
-            ...input,
-            onPlan,
-            now,
-            randomUUID,
-        });
+        let receipt;
+        try {
+            const input = await loadBrowserFolderInput({ rootHandle });
+            receipt = await provisionBrowserFolder({
+                rootHandle,
+                ...input,
+                onPlan,
+                now,
+                randomUUID,
+            });
+        } catch (error) {
+            if (
+                error?.name === 'NotFoundError'
+                || [
+                    'browser_folder_wrong_sillytavern_root',
+                    'browser_folder_extension_install_not_found',
+                ].includes(error?.reasonCode)
+            ) {
+                await clearSavedDirectoryHandle();
+            }
+            throw error;
+        }
         return Object.freeze({
             status: receipt.status,
             adapter: 'browser-folder',
