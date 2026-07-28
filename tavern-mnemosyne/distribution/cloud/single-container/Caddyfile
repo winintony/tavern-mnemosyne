@@ -1,0 +1,12 @@
+{
+	servers {
+		trusted_proxies static private_ranges
+	}
+}
+
+{$MNEMOSYNE_PUBLIC_HOST} {
+	request_body {
+		max_size 72MB
+	}
+	reverse_proxy gate:8080
+}

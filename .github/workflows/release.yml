@@ -1,0 +1,344 @@
+name: Test and package
+
+on:
+  push:
+    branches: [main, release-candidate]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  release-surface:
+    name: release-surface
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Require the release tag to point at main
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          set -eu
+          git fetch --no-tags origin \
+            main:refs/remotes/origin/main
+          test "$(git rev-parse HEAD^{commit})" = \
+            "$(git rev-parse refs/remotes/origin/main^{commit})"
+      - name: Audit the complete public tree
+        run: node .github/verify-public-release.mjs .
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: tavern-mnemosyne/package-lock.json
+      - working-directory: tavern-mnemosyne
+        run: npm ci --omit=dev --no-audit --no-fund
+      - name: Verify generated browser registry and runtime manifest
+        working-directory: tavern-mnemosyne
+        shell: bash
+        run: |
+          set -eu
+          npm run build:browser-registry
+          npm run build:runtime-bundle
+          git diff --exit-code -- \
+            integrations/sillytavern-extension/control-operation-registry-browser.js \
+            distribution/runtime-bundle/manifest.json
+          test -f distribution/runtime-bundle/runtime.tar.gz
+      - name: Stage the sealed runtime Release asset
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          set -eu
+          mkdir -p runtime-release-asset
+          cp tavern-mnemosyne/distribution/runtime-bundle/runtime.tar.gz \
+            "runtime-release-asset/Tavern-Mnemosyne-Runtime-${GITHUB_REF_NAME}.tar.gz"
+          cp tavern-mnemosyne/distribution/runtime-bundle/manifest.json \
+            "runtime-release-asset/Tavern-Mnemosyne-Runtime-${GITHUB_REF_NAME}.manifest.json"
+      - if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: runtime-release-asset
+          path: runtime-release-asset/*
+          if-no-files-found: error
+
+  cloud-image-check:
+    if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-24.04
+    needs: release-surface
+    strategy:
+      matrix:
+        dockerfile:
+          - tavern-mnemosyne/distribution/cloud/single-container/Dockerfile
+          - tavern-mnemosyne/distribution/cloud/shared-network-namespace/Dockerfile
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Build the cloud profile without publication credentials
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: false
+          provenance: mode=max
+          sbom: true
+
+  cloud-images:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    needs: release-surface
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4.5.1
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Resolve single-container image tags
+        id: cloud-metadata
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/tavern-mnemosyne-cloud
+          tags: |
+            type=semver,pattern={{version}}
+            type=ref,event=branch
+            type=ref,event=pr
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+      - name: Build and optionally publish the single-container image
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          file: tavern-mnemosyne/distribution/cloud/single-container/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.cloud-metadata.outputs.tags }}
+          labels: ${{ steps.cloud-metadata.outputs.labels }}
+          provenance: mode=max
+          sbom: true
+      - name: Resolve shared-namespace runtime image tags
+        id: runtime-metadata
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/tavern-mnemosyne-runtime
+          tags: |
+            type=semver,pattern={{version}}
+            type=ref,event=branch
+            type=ref,event=pr
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+      - name: Build and optionally publish the shared-namespace runtime image
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          file: tavern-mnemosyne/distribution/cloud/shared-network-namespace/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.runtime-metadata.outputs.tags }}
+          labels: ${{ steps.runtime-metadata.outputs.labels }}
+          provenance: mode=max
+          sbom: true
+
+  package:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [release-surface, cloud-images]
+    strategy:
+      matrix:
+        include:
+          - os: macos-14
+            archive: tar
+            node_sha256: ee920559aaa2391569cff4d737e3b83963430e3a14dedd91bfe0ff53171b5af9
+          - os: ubuntu-24.04
+            archive: tar
+            node_sha256: 22b5f47ad6ae78837e4c2b846019965ce1a06ba143de176102294a1bf44fc677
+          - os: windows-2025
+            archive: zip
+            node_sha256: d3b2277dbcccfdf24ef6302928f64f484cff1d77a6d3caa3a28f4d20ce9158f6
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: tavern-mnemosyne/package-lock.json
+      - working-directory: tavern-mnemosyne
+        run: npm ci --omit=dev
+      - name: Require the release tag and all public manifests to agree
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -eu
+          node --input-type=module -e "
+            import fs from 'node:fs';
+            const expected = process.env.RELEASE_TAG.replace(/^v/, '');
+            const files = [
+              'package.json',
+              'manifest.json',
+              'tavern-mnemosyne/package.json',
+              'tavern-mnemosyne/integrations/sillytavern-extension/manifest.json',
+            ];
+            for (const file of files) {
+              const version = JSON.parse(fs.readFileSync(file)).version;
+              if (version !== expected) {
+                throw new Error(file + ' version ' + version
+                  + ' does not match release ' + expected);
+              }
+            }
+          "
+      - shell: bash
+        run: |
+          set -eu
+          node_version="26.5.0"
+          node_sha256="${{ matrix.node_sha256 }}"
+          package_root="Tavern-Mnemosyne-Companion-${{ github.ref_name }}-${{ runner.os }}-${{ runner.arch }}"
+          mkdir -p "$package_root/runtime"
+          cp -R tavern-mnemosyne/src "$package_root/src"
+          cp -R tavern-mnemosyne/node_modules "$package_root/node_modules"
+          cp tavern-mnemosyne/package.json tavern-mnemosyne/package-lock.json "$package_root/"
+          cp tavern-mnemosyne/distribution/companion-launcher.mjs "$package_root/"
+          cp tavern-mnemosyne/distribution/companion.config.example.json "$package_root/"
+          cp tavern-mnemosyne/distribution/start-macos.command "$package_root/"
+          cp tavern-mnemosyne/distribution/start-linux.sh "$package_root/"
+          cp tavern-mnemosyne/distribution/start-windows.cmd "$package_root/"
+          cp tavern-mnemosyne/distribution/GITHUB-README.md \
+            "$package_root/README.md"
+          case "${RUNNER_OS}-${RUNNER_ARCH}" in
+            macOS-ARM64) node_target="darwin-arm64"; node_binary="bin/node";;
+            macOS-X64) node_target="darwin-x64"; node_binary="bin/node";;
+            Linux-X64) node_target="linux-x64"; node_binary="bin/node";;
+            Windows-X64) node_target="win-x64"; node_binary="node.exe";;
+            *) echo "Unsupported runner: ${RUNNER_OS}-${RUNNER_ARCH}" >&2; exit 1;;
+          esac
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            node_archive="node-runtime.zip"
+            curl -fsSL "https://nodejs.org/dist/v${node_version}/node-v${node_version}-${node_target}.zip" -o "$node_archive"
+            NODE_ARCHIVE="$node_archive" EXPECTED_NODE_SHA256="$node_sha256" \
+              node --input-type=module -e "
+                import fs from 'node:fs';
+                import { createHash } from 'node:crypto';
+                const actual = createHash('sha256')
+                  .update(fs.readFileSync(process.env.NODE_ARCHIVE))
+                  .digest('hex');
+                if (actual !== process.env.EXPECTED_NODE_SHA256) {
+                  throw new Error('Downloaded Node runtime hash mismatch');
+                }
+              "
+            7z x node-runtime.zip
+            cp "node-v${node_version}-${node_target}/${node_binary}" "$package_root/runtime/node.exe"
+          else
+            node_archive="node-runtime.tar.gz"
+            curl -fsSL "https://nodejs.org/dist/v${node_version}/node-v${node_version}-${node_target}.tar.gz" -o "$node_archive"
+            NODE_ARCHIVE="$node_archive" EXPECTED_NODE_SHA256="$node_sha256" \
+              node --input-type=module -e "
+                import fs from 'node:fs';
+                import { createHash } from 'node:crypto';
+                const actual = createHash('sha256')
+                  .update(fs.readFileSync(process.env.NODE_ARCHIVE))
+                  .digest('hex');
+                if (actual !== process.env.EXPECTED_NODE_SHA256) {
+                  throw new Error('Downloaded Node runtime hash mismatch');
+                }
+              "
+            tar -xzf node-runtime.tar.gz
+            cp "node-v${node_version}-${node_target}/${node_binary}" "$package_root/runtime/node"
+          fi
+          chmod +x "$package_root/runtime/node" "$package_root/start-macos.command" "$package_root/start-linux.sh" 2>/dev/null || true
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            7z a "$package_root.zip" "$package_root"
+            mkdir -p release-output
+            mv "$package_root.zip" release-output/
+          else
+            tar -czf "$package_root.tar.gz" "$package_root"
+            mkdir -p release-output
+            mv "$package_root.tar.gz" release-output/
+          fi
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: companion-${{ runner.os }}-${{ runner.arch }}
+          path: release-output/*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [release-surface, package]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: release-assets
+          pattern: companion-*
+          merge-multiple: true
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: release-assets
+          pattern: runtime-release-asset
+          merge-multiple: true
+      - name: Add cloud deployment assets
+        shell: bash
+        run: |
+          set -eu
+          (
+            cd tavern-mnemosyne/distribution/cloud
+            zip -r "${GITHUB_WORKSPACE}/release-assets/Tavern-Mnemosyne-Cloud-${GITHUB_REF_NAME}.zip" \
+              common shared-network-namespace single-container
+          )
+      - name: Package the consent-gated macOS installer
+        shell: bash
+        run: |
+          set -eu
+          mkdir -p release-installer
+          sed "s/__MNEMOSYNE_RELEASE_REF__/${GITHUB_REF_NAME}/g" \
+            tavern-mnemosyne/distribution/install-macos.command \
+            > release-installer/install-macos.command
+          chmod +x release-installer/install-macos.command
+          (
+            cd release-installer
+            zip ../release-assets/Tavern-Mnemosyne-macOS-Installer.zip \
+              install-macos.command
+          )
+      - name: Write release checksums
+        shell: bash
+        run: |
+          set -eu
+          (
+            cd release-assets
+            sha256sum * > SHA256SUMS
+          )
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -eu
+          mapfile -d '' assets < <(find release-assets -maxdepth 1 -type f -print0)
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "No release assets found" >&2
+            exit 1
+          fi
+          if gh release view "${{ github.ref_name }}" >/dev/null 2>&1; then
+            is_draft="$(
+              gh release view "${{ github.ref_name }}" \
+                --json isDraft --jq .isDraft
+            )"
+            if [ "$is_draft" != true ]; then
+              echo "Published Release already exists and is immutable." >&2
+              exit 1
+            fi
+            echo "Resuming the existing unpublished Release draft."
+          else
+            gh release create "${{ github.ref_name }}" \
+              --draft --generate-notes --verify-tag
+          fi
+          gh release upload "${{ github.ref_name }}" \
+            "${assets[@]}" --clobber
+          gh release edit "${{ github.ref_name }}" --draft=false

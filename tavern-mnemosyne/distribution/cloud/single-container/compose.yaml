@@ -1,0 +1,74 @@
+services:
+  app:
+    image: ghcr.io/winintony/tavern-mnemosyne-cloud:${MNEMOSYNE_VERSION:-0.2.0}
+    restart: unless-stopped
+    user: node
+    expose:
+      - "8000"
+    environment:
+      MNEMOSYNE_STATE_ROOT: /home/node/app/data/_mnemosyne
+      MNEMOSYNE_UPSTREAM_BASE_URL: ${MNEMOSYNE_UPSTREAM_BASE_URL:?required}
+      MNEMOSYNE_UPSTREAM_MODEL: ${MNEMOSYNE_UPSTREAM_MODEL:?required}
+      MNEMOSYNE_PROVIDER_CONTEXT_TOKENS: ${MNEMOSYNE_PROVIDER_CONTEXT_TOKENS:?required}
+      MNEMOSYNE_PROVIDER_OUTPUT_RESERVE_TOKENS: ${MNEMOSYNE_PROVIDER_OUTPUT_RESERVE_TOKENS:?required}
+      SILLYTAVERN_HOSTWHITELIST_ENABLED: "true"
+      SILLYTAVERN_HOSTWHITELIST_HOSTS: "[\"${MNEMOSYNE_PUBLIC_HOST:?required}\"]"
+      SILLYTAVERN_PRIVATEADDRESSWHITELIST_ENABLED: "true"
+      SILLYTAVERN_PRIVATEADDRESSWHITELIST_ALLOWEDRANGES: '["127.0.0.0/8","::1/128"]'
+    secrets:
+      - mnemosyne_context_token
+      - st_basic_auth_username
+      - st_basic_auth_password
+    volumes:
+      - st-config:/home/node/app/config
+      - st-data:/home/node/app/data
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - /opt/tavern-mnemosyne/tavern-mnemosyne/distribution/cloud/common/combined-health.mjs
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+
+  gate:
+    image: nginx:1.29.5-alpine@sha256:1eff5a5f3fcf8431a0abb7eddf5471fec24e5e1905a2581aeacdb07a4479b92b
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    expose:
+      - "8080"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+
+  https:
+    image: caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
+    restart: unless-stopped
+    depends_on:
+      gate:
+        condition: service_started
+    environment:
+      MNEMOSYNE_PUBLIC_HOST: ${MNEMOSYNE_PUBLIC_HOST:?required}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+secrets:
+  mnemosyne_context_token:
+    file: ${MNEMOSYNE_CONTEXT_TOKEN_FILE:?required}
+  st_basic_auth_username:
+    file: ${ST_BASIC_AUTH_USERNAME_FILE:?required}
+  st_basic_auth_password:
+    file: ${ST_BASIC_AUTH_PASSWORD_FILE:?required}
+
+volumes:
+  st-config:
+  st-data:
+  caddy-data:
+  caddy-config:

@@ -1,0 +1,253 @@
+#tavern_mnemosyne_settings {
+  display: grid;
+  gap: 10px;
+}
+
+#tavern_mnemosyne_settings .mnemosyne-setting-row {
+  align-items: center;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(110px, auto) minmax(0, 1fr);
+}
+
+#tavern_mnemosyne_settings .mnemosyne-status-row {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+#tavern_mnemosyne_settings .mnemosyne-status {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+#tavern_mnemosyne_settings .mnemosyne-live-run-row {
+  display: grid;
+  gap: 4px;
+}
+
+#tavern_mnemosyne_settings .mnemosyne-live-run-row .menu_button {
+  align-items: center;
+  display: inline-flex;
+  gap: 8px;
+  justify-content: center;
+  width: fit-content;
+}
+
+#tavern_mnemosyne_settings input[type="url"],
+#tavern_mnemosyne_settings input[type="password"] {
+  min-width: 0;
+  width: 100%;
+}
+
+#tavern_mnemosyne_settings .mnemosyne-icon-button {
+  align-items: center;
+  display: inline-flex;
+  height: 32px;
+  justify-content: center;
+  width: 32px;
+}
+
+#tavern_mnemosyne_settings .mnemosyne-provisioning-panel,
+#tavern_mnemosyne_settings .mnemosyne-advanced-loopback {
+  border: 1px solid rgb(255 255 255 / 12%);
+  border-radius: 6px;
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+}
+
+#tavern_mnemosyne_settings .mnemosyne-provisioning-panel small {
+  opacity: 0.8;
+}
+
+#tavern_mnemosyne_settings .mnemosyne-provisioning-panel .menu_button {
+  justify-self: start;
+  min-width: 160px;
+  width: auto;
+}
+
+#tavern_mnemosyne_settings .mnemosyne-provisioning-status {
+  overflow-wrap: anywhere;
+}
+
+#tavern_mnemosyne_settings .mnemosyne-provisioning-status[data-kind="ok"] {
+  color: var(--SmartThemeQuoteColor);
+}
+
+#tavern_mnemosyne_settings .mnemosyne-provisioning-status[data-kind="error"] {
+  color: var(--warning);
+}
+
+#tavern_mnemosyne_settings .mnemosyne-provisioning-plan pre {
+  font-size: 0.78em;
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
+#tavern_mnemosyne_settings .mnemosyne-advanced-loopback > summary {
+  cursor: pointer;
+}
+
+#tavern_mnemosyne_settings .mnemosyne-advanced-loopback[open] {
+  gap: 10px;
+}
+
+#tavern_mnemosyne_settings .mnemosyne-companion-panel {
+  border-top: 1px solid rgb(255 255 255 / 12%);
+  display: grid;
+  gap: 8px;
+  padding-top: 10px;
+}
+
+#tavern_mnemosyne_settings .mnemosyne-companion-panel small {
+  opacity: 0.75;
+}
+
+#tavern_mnemosyne_settings .mnemosyne-companion-consent {
+  border: 1px solid rgb(255 255 255 / 12%);
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+
+#tavern_mnemosyne_settings .mnemosyne-companion-consent summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+#tavern_mnemosyne_settings .mnemosyne-companion-consent-body {
+  font-size: 0.9em;
+  line-height: 1.45;
+  padding-top: 6px;
+}
+
+#tavern_mnemosyne_settings .mnemosyne-companion-consent-body ul {
+  margin: 6px 0;
+  padding-inline-start: 20px;
+}
+
+#tavern_mnemosyne_settings .mnemosyne-companion-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+#tavern_mnemosyne_settings .mnemosyne-companion-actions .menu_button {
+  min-width: 0;
+  width: auto;
+}
+
+#tavern_mnemosyne_settings .mnemosyne-companion-status {
+  overflow-wrap: anywhere;
+}
+
+#tavern_mnemosyne_settings .mnemosyne-companion-status[data-kind="error"] {
+  color: var(--warning);
+}
+
+#tavern_mnemosyne_settings .mnemosyne-feedback-panel {
+  border-top: 1px solid rgb(255 255 255 / 12%);
+  display: grid;
+  gap: 8px;
+  padding-top: 10px;
+}
+
+#tavern_mnemosyne_settings .mnemosyne-feedback-panel small {
+  opacity: 0.75;
+}
+
+#tavern_mnemosyne_settings .mnemosyne-feedback-actions,
+#tavern_mnemosyne_settings .mnemosyne-feedback-answers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+#tavern_mnemosyne_settings .mnemosyne-feedback-actions .menu_button,
+#tavern_mnemosyne_settings .mnemosyne-feedback-answers .menu_button {
+  min-width: 0;
+  width: auto;
+}
+
+#tavern_mnemosyne_settings .mnemosyne-feedback-question {
+  display: grid;
+  gap: 6px;
+}
+
+#tavern_mnemosyne_settings .mnemosyne-feedback-facet {
+  display: grid;
+  gap: 4px;
+}
+
+#tavern_mnemosyne_settings .mnemosyne-feedback-facet select {
+  min-width: 0;
+  width: 100%;
+}
+
+#tavern_mnemosyne_settings .mnemosyne-feedback-question[hidden] {
+  display: none;
+}
+
+#tavern_mnemosyne_settings .mnemosyne-feedback-status {
+  overflow-wrap: anywhere;
+}
+
+#tavern_mnemosyne_settings .mnemosyne-feedback-status[data-kind="error"] {
+  color: var(--warning);
+}
+
+#tavern_mnemosyne_settings .mnemosyne-activity-panel {
+  border-top: 1px solid rgb(255 255 255 / 12%);
+  display: grid;
+  gap: 8px;
+  padding-top: 10px;
+}
+
+#tavern_mnemosyne_settings .mnemosyne-activity-panel small {
+  opacity: 0.75;
+}
+
+#tavern_mnemosyne_settings .mnemosyne-activity-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+#tavern_mnemosyne_settings .mnemosyne-activity-actions .menu_button {
+  min-width: 0;
+  width: auto;
+}
+
+#tavern_mnemosyne_settings .mnemosyne-activity-results,
+#tavern_mnemosyne_settings .mnemosyne-activity-entries,
+#tavern_mnemosyne_settings .mnemosyne-activity-entry-body {
+  display: grid;
+  gap: 6px;
+}
+
+#tavern_mnemosyne_settings .mnemosyne-activity-entry {
+  border: 1px solid rgb(255 255 255 / 12%);
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+
+#tavern_mnemosyne_settings .mnemosyne-activity-entry summary {
+  cursor: pointer;
+}
+
+#tavern_mnemosyne_settings .mnemosyne-activity-entry-body {
+  font-size: 0.9em;
+  opacity: 0.9;
+  padding-top: 6px;
+}
+
+#tavern_mnemosyne_settings .mnemosyne-activity-status[data-kind="error"] {
+  color: var(--warning);
+}
+
+#tavern_mnemosyne_settings .mnemosyne-activity-results[hidden],
+#tavern_mnemosyne_settings .mnemosyne-activity-actions [hidden] {
+  display: none;
+}

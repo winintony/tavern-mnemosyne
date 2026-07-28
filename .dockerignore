@@ -1,0 +1,14 @@
+**
+!package.json
+!manifest.json
+!tavern-mnemosyne/
+!tavern-mnemosyne/**
+tavern-mnemosyne/node_modules/
+tavern-mnemosyne/.cache/
+tavern-mnemosyne/data/
+tavern-mnemosyne/coverage/
+tavern-mnemosyne/test-results/
+tavern-mnemosyne/tests/
+tavern-mnemosyne/docs/
+tavern-mnemosyne/scripts/
+tavern-mnemosyne/distribution/runtime-bundle/

@@ -1,0 +1,458 @@
+import {
+  answersForRealUseQuickAnswer,
+  buildRealUseFeedbackCommand,
+  buildRealUseFeedbackExportRequest,
+  buildRealUseFeedbackPrepareRequest,
+  buildRealUseFeedbackWithdrawCommand,
+  validateRealUseFeedbackQuestionnaire,
+} from './real-use-feedback.js';
+
+const LOCAL_FEEDBACK_CONSENT = Object.freeze({
+  storage: 'local_only',
+  acknowledged_not_story_memory: true,
+  acknowledged_no_automatic_upload: true,
+});
+const EXPORT_CONSENT = Object.freeze({
+  schema: 'mnemosyne.feedback-export-consent.v1',
+  acknowledged_explicit_export: true,
+  acknowledged_no_automatic_upload: true,
+  acknowledged_deidentified_not_anonymous: true,
+});
+
+function controllerError(reasonCode, message) {
+  const error = new Error(message);
+  error.reasonCode = reasonCode;
+  return error;
+}
+
+function normalizeRunReference(input) {
+  if (
+    input
+    && Object.keys(input).length === 2
+    && Object.hasOwn(input, 'chat_id')
+    && Object.hasOwn(input, 'run_id')
+  ) {
+    return buildRealUseFeedbackPrepareRequest({
+      chatId: input.chat_id,
+      runId: input.run_id,
+    });
+  }
+  return buildRealUseFeedbackPrepareRequest(input);
+}
+
+function sameRun(left, right) {
+  return Boolean(
+    left
+    && right
+    && left.chat_id === right.chat_id
+    && left.run_id === right.run_id,
+  );
+}
+
+function initialState() {
+  return {
+    enabled: false,
+    pendingCompletedRun: null,
+    resolvedRun: null,
+    recentRun: null,
+    prepared: null,
+    lastFeedback: null,
+    panelOpen: false,
+    status: 'Feedback disabled',
+    statusKind: 'idle',
+  };
+}
+
+export function createRealUseFeedbackController({
+  post,
+  download,
+  createId,
+  onChange = () => {},
+}) {
+  if (
+    typeof post !== 'function'
+    || typeof download !== 'function'
+    || typeof createId !== 'function'
+    || typeof onChange !== 'function'
+  ) {
+    throw new TypeError(
+      'Real-use feedback controller dependencies are invalid.',
+    );
+  }
+
+  const state = initialState();
+
+  function snapshot() {
+    return structuredClone(state);
+  }
+
+  function notify() {
+    try {
+      onChange(snapshot());
+    } catch {
+      // Rendering failures cannot affect story or feedback state.
+    }
+  }
+
+  function setStatus(value, kind = 'idle') {
+    state.status = value;
+    state.statusKind = kind;
+    notify();
+  }
+
+  function fail(error) {
+    const reasonCode =
+      error?.reasonCode
+      ?? 'real_use_feedback_failed';
+    setStatus(
+      `Feedback unavailable: ${reasonCode}`,
+      'error',
+    );
+    return {
+      ok: false,
+      reason_code: reasonCode,
+    };
+  }
+
+  function setEnabled(enabled) {
+    if (typeof enabled !== 'boolean') {
+      throw controllerError(
+        'real_use_feedback_setting_invalid',
+        'Real-use feedback enabled must be boolean.',
+      );
+    }
+    state.enabled = enabled;
+    state.panelOpen = false;
+    if (!enabled) state.prepared = null;
+    state.status = enabled
+      ? (
+          state.recentRun
+            ? 'Latest governed reply is ready to evaluate.'
+            : 'No recent governed reply is available.'
+        )
+      : 'Feedback disabled';
+    state.statusKind = 'idle';
+    notify();
+  }
+
+  function captureCompletedOwnedRun(input) {
+    const run = normalizeRunReference(input);
+    if (
+      sameRun(state.recentRun, run)
+      || sameRun(state.resolvedRun, run)
+    ) {
+      state.pendingCompletedRun = null;
+      notify();
+      return structuredClone(run);
+    }
+    state.pendingCompletedRun = Object.freeze(run);
+    notify();
+    return structuredClone(run);
+  }
+
+  function resolveOwnedReplyRun({
+    chatId,
+    liveRunId = null,
+  }) {
+    let resolved = null;
+    if (liveRunId !== null) {
+      resolved = buildRealUseFeedbackPrepareRequest({
+        chatId,
+        runId: liveRunId,
+      });
+    } else if (
+      state.pendingCompletedRun?.chat_id === chatId
+    ) {
+      resolved =
+        structuredClone(state.pendingCompletedRun);
+      state.pendingCompletedRun = null;
+    }
+    if (!resolved) return null;
+    state.resolvedRun = Object.freeze(
+      structuredClone(resolved),
+    );
+    notify();
+    return resolved;
+  }
+
+  function rememberGovernedReply(input) {
+    const run = normalizeRunReference(input);
+    state.pendingCompletedRun = null;
+    state.resolvedRun = Object.freeze(
+      structuredClone(run),
+    );
+    state.recentRun = Object.freeze(run);
+    state.prepared = null;
+    state.panelOpen = false;
+    state.status = state.enabled
+      ? 'Latest governed reply is ready to evaluate.'
+      : 'Feedback disabled';
+    state.statusKind = 'idle';
+    notify();
+  }
+
+  function clearForHistoryMutation({
+    clearLastFeedback = false,
+  } = {}) {
+    state.pendingCompletedRun = null;
+    state.resolvedRun = null;
+    state.recentRun = null;
+    state.prepared = null;
+    state.panelOpen = false;
+    if (clearLastFeedback) state.lastFeedback = null;
+    state.status = state.enabled
+      ? 'No recent governed reply is available.'
+      : 'Feedback disabled';
+    state.statusKind = 'idle';
+    notify();
+  }
+
+  async function prepare() {
+    try {
+      if (!state.enabled) {
+        throw controllerError(
+          'real_use_feedback_disabled',
+          'Real-use feedback is disabled.',
+        );
+      }
+      const recentRun = state.recentRun;
+      if (!recentRun) {
+        throw controllerError(
+          'real_use_feedback_target_unavailable',
+          'No recent governed reply is available.',
+        );
+      }
+      setStatus('Preparing the governed evaluation case…');
+      const result = await post(
+        '/v1/mnemosyne/evaluation/prepare',
+        structuredClone(recentRun),
+      );
+      if (
+        !state.enabled
+        || state.recentRun !== recentRun
+      ) {
+        throw controllerError(
+          'real_use_feedback_target_changed',
+          'The governed reply changed while preparing feedback.',
+        );
+      }
+      if (
+        result?.case_status === 'answered'
+        && result?.active_feedback
+      ) {
+        const lastFeedback = Object.freeze({
+          feedback_id: result.active_feedback.feedback_id,
+          feedback_hash: result.active_feedback.feedback_hash,
+          chat_id: recentRun.chat_id,
+        });
+        buildRealUseFeedbackWithdrawCommand({
+          commandId: 'feedback-reference-validation',
+          chatId: lastFeedback.chat_id,
+          feedbackId: lastFeedback.feedback_id,
+          feedbackHash: lastFeedback.feedback_hash,
+        });
+        state.lastFeedback = lastFeedback;
+        state.recentRun = null;
+        state.prepared = null;
+        state.panelOpen = false;
+        setStatus(
+          'Feedback already exists; it can be withdrawn.',
+          'success',
+        );
+        return { ok: true, status: 'answered' };
+      }
+      if (result?.case_status !== 'prepared') {
+        throw controllerError(
+          'feedback_case_unavailable',
+          'The evaluation case is no longer open for feedback.',
+        );
+      }
+      const questionnaire =
+        validateRealUseFeedbackQuestionnaire(
+          result.questionnaire,
+        );
+      const prepared = Object.freeze({
+        chatId: recentRun.chat_id,
+        caseId: result.case_id,
+        receiptHash: result?.receipt?.receipt_hash,
+        questionnaire,
+      });
+      const allClear =
+        questionnaire.presentation.quick_answers.find(
+          quickAnswer => quickAnswer.strategy === 'all_clear',
+        );
+      buildRealUseFeedbackCommand({
+        commandId: 'feedback-receipt-validation',
+        chatId: prepared.chatId,
+        caseId: prepared.caseId,
+        receiptHash: prepared.receiptHash,
+        questionnaire: prepared.questionnaire,
+        consent: LOCAL_FEEDBACK_CONSENT,
+        answers: answersForRealUseQuickAnswer(
+          questionnaire,
+          allClear.value,
+        ),
+      });
+      state.prepared = prepared;
+      state.panelOpen = true;
+      setStatus(
+        'Evaluation ready. Choose one structured answer.',
+      );
+      return { ok: true, status: 'prepared' };
+    } catch (error) {
+      return fail(error);
+    }
+  }
+
+  async function submit({
+    quickAnswer,
+    facet = null,
+  }) {
+    try {
+      if (!state.enabled) {
+        throw controllerError(
+          'real_use_feedback_disabled',
+          'Real-use feedback is disabled.',
+        );
+      }
+      const prepared = state.prepared;
+      if (!prepared) {
+        throw controllerError(
+          'real_use_feedback_case_unavailable',
+          'Prepare the latest governed reply before answering.',
+        );
+      }
+      const definition =
+        prepared.questionnaire.presentation.quick_answers.find(
+          candidate => candidate.value === quickAnswer,
+        );
+      const answers = answersForRealUseQuickAnswer(
+        prepared.questionnaire,
+        quickAnswer,
+        definition?.requires_facet
+          ? { facet }
+          : undefined,
+      );
+      const command = buildRealUseFeedbackCommand({
+        commandId: createId(),
+        chatId: prepared.chatId,
+        caseId: prepared.caseId,
+        receiptHash: prepared.receiptHash,
+        questionnaire: prepared.questionnaire,
+        consent: LOCAL_FEEDBACK_CONSENT,
+        answers,
+      });
+      const result = await post(
+        '/v1/mnemosyne/evaluation/feedback',
+        command,
+      );
+      if (state.prepared !== prepared) {
+        setStatus(
+          'Feedback was recorded for the previous chat; its local withdrawal reference was cleared.',
+          'success',
+        );
+        return { ok: true, status: 'recorded_for_previous_target' };
+      }
+      const lastFeedback = Object.freeze({
+        feedback_id: result?.feedback_id,
+        feedback_hash: result?.feedback_hash,
+        chat_id: prepared.chatId,
+      });
+      buildRealUseFeedbackWithdrawCommand({
+        commandId: 'feedback-reference-validation',
+        chatId: lastFeedback.chat_id,
+        feedbackId: lastFeedback.feedback_id,
+        feedbackHash: lastFeedback.feedback_hash,
+      });
+      state.lastFeedback = lastFeedback;
+      state.pendingCompletedRun = null;
+      state.recentRun = null;
+      state.prepared = null;
+      state.panelOpen = false;
+      setStatus(
+        'Recorded in the local evaluation ledger.',
+        'success',
+      );
+      return { ok: true, status: 'recorded' };
+    } catch (error) {
+      return fail(error);
+    }
+  }
+
+  async function withdraw() {
+    try {
+      const lastFeedback = state.lastFeedback;
+      if (!lastFeedback) {
+        throw controllerError(
+          'real_use_feedback_withdraw_unavailable',
+          'No recent feedback is available to withdraw.',
+        );
+      }
+      const command = buildRealUseFeedbackWithdrawCommand({
+        commandId: createId(),
+        chatId: lastFeedback.chat_id,
+        feedbackId: lastFeedback.feedback_id,
+        feedbackHash: lastFeedback.feedback_hash,
+      });
+      await post(
+        '/v1/mnemosyne/evaluation/feedback',
+        command,
+      );
+      if (state.lastFeedback === lastFeedback) {
+        state.lastFeedback = null;
+      }
+      setStatus(
+        'Recent feedback was logically withdrawn.',
+        'success',
+      );
+      return { ok: true, status: 'withdrawn' };
+    } catch (error) {
+      return fail(error);
+    }
+  }
+
+  async function exportDeidentified({ chatId }) {
+    try {
+      if (!chatId) {
+        throw controllerError(
+          'real_use_feedback_chat_unavailable',
+          'Open a chat before exporting feedback.',
+        );
+      }
+      const request = buildRealUseFeedbackExportRequest({
+        exportId: createId(),
+        chatId,
+        consent: EXPORT_CONSENT,
+      });
+      const bundle = await post(
+        '/v1/mnemosyne/evaluation/export',
+        request,
+      );
+      download(bundle);
+      setStatus(
+        `Exported ${
+          Array.isArray(bundle?.records)
+            ? bundle.records.length
+            : 0
+        } server-de-identified record(s).`,
+        'success',
+      );
+      return { ok: true, status: 'exported' };
+    } catch (error) {
+      return fail(error);
+    }
+  }
+
+  return Object.freeze({
+    snapshot,
+    setEnabled,
+    captureCompletedOwnedRun,
+    resolveOwnedReplyRun,
+    rememberGovernedReply,
+    clearForHistoryMutation,
+    prepare,
+    submit,
+    withdraw,
+    exportDeidentified,
+  });
+}

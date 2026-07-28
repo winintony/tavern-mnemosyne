@@ -1,0 +1,257 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tavern-mnemosyne
+data:
+  MNEMOSYNE_UPSTREAM_BASE_URL: https://api.openai.com/v1
+  MNEMOSYNE_UPSTREAM_MODEL: gpt-5.6-terra
+  MNEMOSYNE_PROVIDER_CONTEXT_TOKENS: "262144"
+  MNEMOSYNE_PROVIDER_OUTPUT_RESERVE_TOKENS: "32768"
+  SILLYTAVERN_HOSTWHITELIST_HOSTS: '["story.example.com"]'
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tavern-mnemosyne
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: tavern-mnemosyne
+  template:
+    metadata:
+      labels:
+        app: tavern-mnemosyne
+    spec:
+      shareProcessNamespace: true
+      securityContext:
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+      initContainers:
+        - name: install-published-code
+          image: ghcr.io/winintony/tavern-mnemosyne-runtime:0.2.0
+          command: ["/bin/sh", "-ec"]
+          args:
+            - >-
+              cp -R /opt/tavern-mnemosyne /bootstrap/plugins/tavern-mnemosyne
+              && cp -R
+              /opt/tavern-mnemosyne/tavern-mnemosyne/integrations/sillytavern-extension
+              /bootstrap/extensions/tavern-mnemosyne
+              && chown -R 1000:1000 /bootstrap/plugins /bootstrap/extensions
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          volumeMounts:
+            - name: plugins
+              mountPath: /bootstrap/plugins
+            - name: extensions
+              mountPath: /bootstrap/extensions
+      containers:
+        - name: sillytavern
+          image: ghcr.io/winintony/tavern-mnemosyne-cloud:0.2.0
+          command: ["tini", "--", "./docker-entrypoint.sh"]
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: MNEMOSYNE_EXTERNAL_RUNTIME
+              value: "true"
+            - name: MNEMOSYNE_ENABLE_EVALUATION_BRIDGE
+              value: "false"
+            - name: MNEMOSYNE_STATE_ROOT
+              value: /tmp/mnemosyne-bridge
+            - name: MNEMOSYNE_CONTEXT_ACCESS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: tavern-mnemosyne
+                  key: context-token
+            - name: SILLYTAVERN_BASICAUTHUSER_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: tavern-mnemosyne
+                  key: st-username
+            - name: SILLYTAVERN_BASICAUTHUSER_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: tavern-mnemosyne
+                  key: st-password
+            - name: SILLYTAVERN_ENABLESERVERPLUGINS
+              value: "true"
+            - name: SILLYTAVERN_ENABLESERVERPLUGINSAUTOUPDATE
+              value: "false"
+            - name: SILLYTAVERN_DISABLECSRFPROTECTION
+              value: "false"
+            - name: SILLYTAVERN_BROWSERLAUNCH_ENABLED
+              value: "false"
+            - name: SILLYTAVERN_LISTEN
+              value: "true"
+            - name: SILLYTAVERN_WHITELISTMODE
+              value: "false"
+            - name: SILLYTAVERN_BASICAUTHMODE
+              value: "true"
+            - name: SILLYTAVERN_CORS_ENABLED
+              value: "false"
+            - name: SILLYTAVERN_HOSTWHITELIST_ENABLED
+              value: "true"
+            - name: SILLYTAVERN_HOSTWHITELIST_HOSTS
+              valueFrom:
+                configMapKeyRef:
+                  name: tavern-mnemosyne
+                  key: SILLYTAVERN_HOSTWHITELIST_HOSTS
+            - name: SILLYTAVERN_PRIVATEADDRESSWHITELIST_ENABLED
+              value: "true"
+            - name: SILLYTAVERN_PRIVATEADDRESSWHITELIST_ALLOWEDRANGES
+              value: '["127.0.0.0/8","::1/128"]'
+          startupProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 2
+            failureThreshold: 45
+          readinessProbe: &combinedProbe
+            exec:
+              command:
+                - node
+                - /home/node/app/plugins/tavern-mnemosyne/tavern-mnemosyne/distribution/cloud/common/combined-health.mjs
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+          livenessProbe:
+            <<: *combinedProbe
+            initialDelaySeconds: 20
+            failureThreshold: 3
+          volumeMounts:
+            - name: st-config
+              mountPath: /home/node/app/config
+            - name: st-data
+              mountPath: /home/node/app/data
+            - name: plugins
+              mountPath: /home/node/app/plugins
+            - name: extensions
+              mountPath: /home/node/app/public/scripts/extensions/third-party
+        - name: mnemosyne
+          image: ghcr.io/winintony/tavern-mnemosyne-runtime:0.2.0
+          envFrom:
+            - configMapRef:
+                name: tavern-mnemosyne
+          env:
+            - name: MNEMOSYNE_CONTEXT_ACCESS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: tavern-mnemosyne
+                  key: context-token
+            - name: SILLYTAVERN_BASICAUTHUSER_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: tavern-mnemosyne
+                  key: st-username
+            - name: SILLYTAVERN_BASICAUTHUSER_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: tavern-mnemosyne
+                  key: st-password
+          startupProbe:
+            httpGet:
+              host: 127.0.0.1
+              port: 18991
+              path: /health
+            periodSeconds: 2
+            failureThreshold: 45
+          readinessProbe: &runtimeCombinedProbe
+            exec:
+              command:
+                - node
+                - /opt/tavern-mnemosyne/tavern-mnemosyne/distribution/cloud/common/combined-health.mjs
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+          livenessProbe:
+            <<: *runtimeCombinedProbe
+            initialDelaySeconds: 20
+            failureThreshold: 3
+          volumeMounts:
+            - name: mnemosyne-data
+              mountPath: /var/lib/mnemosyne
+      volumes:
+        - name: plugins
+          emptyDir: {}
+        - name: extensions
+          emptyDir: {}
+        - name: st-config
+          persistentVolumeClaim:
+            claimName: tavern-mnemosyne-st-config
+        - name: st-data
+          persistentVolumeClaim:
+            claimName: tavern-mnemosyne-st-data
+        - name: mnemosyne-data
+          persistentVolumeClaim:
+            claimName: tavern-mnemosyne-runtime
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: tavern-mnemosyne-st-config
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: tavern-mnemosyne-st-data
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: tavern-mnemosyne-runtime
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: tavern-mnemosyne
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: 72m
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/limit-rps: "20"
+    nginx.ingress.kubernetes.io/limit-burst-multiplier: "3"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [story.example.com]
+      secretName: tavern-mnemosyne-tls
+  rules:
+    - host: story.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: tavern-mnemosyne
+                port:
+                  name: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tavern-mnemosyne
+spec:
+  selector:
+    app: tavern-mnemosyne
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http

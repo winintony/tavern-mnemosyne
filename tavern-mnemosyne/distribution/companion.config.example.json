@@ -1,0 +1,14 @@
+{
+  "host": "127.0.0.1",
+  "port": 18991,
+  "upstreamBaseUrl": "http://127.0.0.1:8318/v1",
+  "upstreamApiKey": "",
+  "upstreamModel": "gpt-5.6-terra",
+  "upstreamAuthMode": "configured",
+  "providerContextTokens": 262144,
+  "providerOutputReserveTokens": 32768,
+  "proxyToken": "",
+  "contextMode": "production",
+  "contextAccessToken": "REPLACE_WITH_A_PRIVATE_RANDOM_TOKEN",
+  "chatSaveRoot": ""
+}

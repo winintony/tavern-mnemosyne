@@ -1,0 +1,170 @@
+{
+  "schema": "mnemosyne.phrase-lexicon.v1",
+  "lexicon_id": "slop-lexicon.zh-CN.general",
+  "locale_profile": "zh-CN",
+  "genre_profile": "general",
+  "version": "zh-CN.general.v1",
+  "phrases": [
+    {
+      "phrase": "霸道地",
+      "severity": "medium"
+    },
+    {
+      "phrase": "不易察觉的",
+      "severity": "high"
+    },
+    {
+      "phrase": "沉默片刻",
+      "severity": "low"
+    },
+    {
+      "phrase": "宠溺地",
+      "severity": "medium"
+    },
+    {
+      "phrase": "低沉的嗓音",
+      "severity": "medium"
+    },
+    {
+      "phrase": "点了点头",
+      "severity": "low"
+    },
+    {
+      "phrase": "顿了顿",
+      "severity": "low"
+    },
+    {
+      "phrase": "仿佛时间静止",
+      "severity": "medium"
+    },
+    {
+      "phrase": "勾起一抹弧度",
+      "severity": "high"
+    },
+    {
+      "phrase": "缓缓开口",
+      "severity": "low"
+    },
+    {
+      "phrase": "回过神来",
+      "severity": "low"
+    },
+    {
+      "phrase": "空气仿佛凝固",
+      "severity": "high"
+    },
+    {
+      "phrase": "空气中弥漫着",
+      "severity": "high"
+    },
+    {
+      "phrase": "露出一抹",
+      "severity": "medium"
+    },
+    {
+      "phrase": "抿了抿唇",
+      "severity": "low"
+    },
+    {
+      "phrase": "眸底深处",
+      "severity": "high"
+    },
+    {
+      "phrase": "眸光微闪",
+      "severity": "medium"
+    },
+    {
+      "phrase": "片刻之后",
+      "severity": "low"
+    },
+    {
+      "phrase": "气氛变得微妙",
+      "severity": "medium"
+    },
+    {
+      "phrase": "轻轻叹了口气",
+      "severity": "low"
+    },
+    {
+      "phrase": "闪过一丝异样",
+      "severity": "high"
+    },
+    {
+      "phrase": "深吸一口气",
+      "severity": "low"
+    },
+    {
+      "phrase": "声音沙哑地",
+      "severity": "medium"
+    },
+    {
+      "phrase": "似笑非笑",
+      "severity": "medium"
+    },
+    {
+      "phrase": "挑了挑眉",
+      "severity": "medium"
+    },
+    {
+      "phrase": "玩味地",
+      "severity": "medium"
+    },
+    {
+      "phrase": "无奈地摇了摇头",
+      "severity": "medium"
+    },
+    {
+      "phrase": "邪魅一笑",
+      "severity": "medium"
+    },
+    {
+      "phrase": "心跳漏了一拍",
+      "severity": "medium"
+    },
+    {
+      "phrase": "心头一紧",
+      "severity": "medium"
+    },
+    {
+      "phrase": "心中一凛",
+      "severity": "medium"
+    },
+    {
+      "phrase": "眼底闪过一丝",
+      "severity": "high"
+    },
+    {
+      "phrase": "眼神变得深邃",
+      "severity": "medium"
+    },
+    {
+      "phrase": "眼中闪过一丝",
+      "severity": "high"
+    },
+    {
+      "phrase": "扬起一抹微笑",
+      "severity": "medium"
+    },
+    {
+      "phrase": "摇了摇头",
+      "severity": "low"
+    },
+    {
+      "phrase": "一丝狡黠",
+      "severity": "high"
+    },
+    {
+      "phrase": "意味深长地",
+      "severity": "medium"
+    },
+    {
+      "phrase": "指尖轻轻划过",
+      "severity": "medium"
+    },
+    {
+      "phrase": "嘴角勾起一抹",
+      "severity": "high"
+    }
+  ],
+  "content_hash": "be513eb3ca168c1547865e73feb9a674b84381b125766553c0bc607d2678050c"
+}
