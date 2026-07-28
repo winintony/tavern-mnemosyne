@@ -17,15 +17,21 @@ function isDeepSeekV4ThinkingEndpoint({
 export function adaptOpenAiCompatibleRequest({
   requestBody,
   endpoint,
+  requestKind = 'generic',
 }) {
   const adapted = structuredClone(requestBody);
   if (isDeepSeekV4ThinkingEndpoint({
     endpoint,
     model: adapted?.model,
   })) {
-    // DeepSeek V4 thinking mode supports tools but rejects tool_choice.
-    // Apply this before the request is hashed, budgeted, or capability-sealed.
+    // DeepSeek V4 rejects tool_choice in thinking mode. Internal structured
+    // extraction does not benefit from hidden reasoning and must reserve its
+    // bounded output for the required tool arguments, so explicitly select
+    // non-thinking mode before the request is integrity-sealed.
     delete adapted.tool_choice;
+    if (requestKind === 'structured_extraction') {
+      adapted.thinking = { type: 'disabled' };
+    }
   }
   return adapted;
 }

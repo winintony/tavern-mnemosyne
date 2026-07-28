@@ -463,6 +463,7 @@ const staticLoreExtractionService = staticLoreIntake && mainHostBinding
     adaptModelRequest: request => adaptOpenAiCompatibleRequest({
       requestBody: request,
       endpoint: upstreamBaseUrl,
+      requestKind: 'structured_extraction',
     }),
   })
   : null;
@@ -514,6 +515,7 @@ const toolProvider = (
       adaptRequest: request => adaptOpenAiCompatibleRequest({
         requestBody: request,
         endpoint: upstreamBaseUrl,
+        requestKind: 'story_tool_step',
       }),
       auth: upstreamAuthMode === 'passthrough'
         ? { mode: 'passthrough' }

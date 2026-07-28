@@ -578,14 +578,33 @@ function preparedRequest({
 function adaptedPreparedRequest(request, adaptModelRequest) {
   const adapted = adaptModelRequest(structuredClone(request));
   const optionalCompatibilityFields = new Set(['tool_choice']);
+  const addedCompatibilityFields = new Set(['thinking']);
+  const safeThinking = (
+    adapted?.thinking
+    && typeof adapted.thinking === 'object'
+    && !Array.isArray(adapted.thinking)
+    && Object.keys(adapted.thinking).length === 1
+    && ['enabled', 'disabled'].includes(adapted.thinking.type)
+  );
   if (
     !adapted
     || typeof adapted !== 'object'
     || Array.isArray(adapted)
-    || Object.keys(adapted).some(key => !Object.hasOwn(request, key))
+    || Object.keys(adapted).some(key => (
+      !Object.hasOwn(request, key)
+      && !addedCompatibilityFields.has(key)
+    ))
     || Object.keys(request).some(key => (
       !optionalCompatibilityFields.has(key)
       && !Object.hasOwn(adapted, key)
+    ))
+    || (
+      Object.hasOwn(adapted, 'thinking')
+      && !safeThinking
+    )
+    || Object.keys(request).some(key => (
+      !optionalCompatibilityFields.has(key)
+      && canonicalJson(adapted[key]) !== canonicalJson(request[key])
     ))
   ) {
     throw new Error(

@@ -119,6 +119,13 @@ function normalizeCompletion(payload, fallbackModel) {
     assistant_message: {
       role: 'assistant',
       content: structuredClone(message.content ?? null),
+      ...(typeof message.reasoning_content === 'string'
+        ? {
+            // DeepSeek thinking-mode tool calls require this exact field on
+            // every subsequent request in the same tool turn.
+            reasoning_content: message.reasoning_content,
+          }
+        : {}),
       tool_calls: toolCalls,
     },
     usage: structuredClone(payload?.usage ?? {}),

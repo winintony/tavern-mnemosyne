@@ -372,6 +372,12 @@ const BLOCK_REASON_TEXT = Object.freeze({
         '当前连接预设的 API 密钥无效或未选中，请重新连接该预设',
     upstream_model_request_incompatible:
         '当前模型拒绝了结构化初始化请求，请切换兼容模型后重试',
+    static_lore_intake_output_truncated:
+        '设定初始化输出达到模型上限，已保留进度；请重试',
+    static_lore_intake_model_failed:
+        '设定初始化模型调用未完成，已保留进度；请重试，持续失败请切换兼容模型',
+    static_lore_intake_upstream_response_error:
+        '模型端点暂时没有完成设定初始化，已保留进度；请重试',
 });
 
 // Raw status values stay in state for governance logic and contract
