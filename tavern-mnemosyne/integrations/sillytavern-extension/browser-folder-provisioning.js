@@ -457,11 +457,15 @@ export function createBrowserFolderRuntimeConfig({
             'The active Custom OpenAI endpoint is not a valid URL.',
         );
     }
-    if (
-        !['http:', 'https:'].includes(parsedUrl.protocol)
-        || ['127.0.0.1', 'localhost', '::1'].includes(
+    const isRuntimeSelfLoop = (
+        ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(
             parsedUrl.hostname,
         )
+        && parsedUrl.port === '18991'
+    );
+    if (
+        !['http:', 'https:'].includes(parsedUrl.protocol)
+        || isRuntimeSelfLoop
         || parsedUrl.username
         || parsedUrl.password
         || parsedUrl.hash

@@ -154,6 +154,10 @@ import {
     createProvisioningOrchestrator,
 } from './provisioning-orchestrator.js';
 import {
+    captureUpstreamConnectionProfile,
+    restoreUpstreamConnectionProfile,
+} from './connection-profile-protection.js';
+import {
     mergeTransportLeaseIntoCustomBody,
 } from './root-transport-lease.js';
 
@@ -172,6 +176,8 @@ const DEFAULT_SETTINGS = Object.freeze({
     // rewrites custom_url to the local runtime. Re-provisioning must read
     // this snapshot, never the (possibly loopback) live custom_url.
     upstreamCustomUrl: '',
+    upstreamConnectionProfileId: '',
+    upstreamConnectionProfileUrl: '',
 });
 
 const state = {
@@ -1076,6 +1082,48 @@ function currentHostBinding() {
             ?? '<unnamed>',
         model: context.getChatCompletionModel?.() ?? '',
     };
+}
+
+function currentConnectionManager() {
+    return getContext().extensionSettings?.connectionManager ?? null;
+}
+
+function protectedConnectionProfileSnapshot() {
+    const current = settings();
+    if (
+        !current.upstreamConnectionProfileId
+        || !current.upstreamConnectionProfileUrl
+    ) {
+        return null;
+    }
+    return {
+        profileId: current.upstreamConnectionProfileId,
+        upstreamUrl: current.upstreamConnectionProfileUrl,
+    };
+}
+
+function captureCurrentUpstreamConnectionProfile(currentUrl) {
+    const snapshot = captureUpstreamConnectionProfile({
+        connectionManager: currentConnectionManager(),
+        currentUrl,
+        runtimeUrl: localRuntimeProxyUrl(),
+    });
+    if (!snapshot) return null;
+    const current = settings();
+    current.upstreamConnectionProfileId = snapshot.profileId;
+    current.upstreamConnectionProfileUrl = snapshot.upstreamUrl;
+    saveSettingsDebounced();
+    return snapshot;
+}
+
+function protectUpstreamConnectionProfile() {
+    const restored = restoreUpstreamConnectionProfile({
+        connectionManager: currentConnectionManager(),
+        snapshot: protectedConnectionProfileSnapshot(),
+        runtimeUrl: localRuntimeProxyUrl(),
+    });
+    if (restored) saveSettingsDebounced();
+    return restored;
 }
 
 function installPreSquashCapture() {
@@ -4819,11 +4867,13 @@ async function resolveCurrentProvisioningUpstreamUrl(
     presetCustomUrl,
     rootHandle,
 ) {
+    captureCurrentUpstreamConnectionProfile(presetCustomUrl);
     let resolution;
     try {
         resolution = resolveProvisioningUpstreamUrl({
             currentUrl: presetCustomUrl,
             persistedUrl: settings().upstreamCustomUrl,
+            runtimeUrl: localRuntimeProxyUrl(),
         });
     } catch (error) {
         if (
@@ -4839,6 +4889,7 @@ async function resolveCurrentProvisioningUpstreamUrl(
             currentUrl: presetCustomUrl,
             persistedUrl: settings().upstreamCustomUrl,
             installedRuntimeUrl: installed?.upstreamBaseUrl,
+            runtimeUrl: localRuntimeProxyUrl(),
         });
     }
     if (resolution.snapshotUrl !== null) {
@@ -4954,6 +5005,7 @@ function bindProvisionedGenerationEndpoint(lease) {
         throw error;
     }
     const runtimeUrl = localRuntimeProxyUrl();
+    protectUpstreamConnectionProfile();
     settings().proxyBaseUrl = runtimeUrl.replace(/\/v1$/, '');
     oai_settings.chat_completion_source = 'custom';
     oai_settings.custom_url = runtimeUrl;
@@ -5125,6 +5177,7 @@ async function enableMnemosyneFromProvisioningCard({
         settings().sessionToken = '';
         settings().enabled = false;
         settings().provisioningPending = true;
+        protectUpstreamConnectionProfile();
         oai_settings.custom_url = localRuntimeProxyUrl();
         saveSettingsDebounced();
         statusElement.textContent =
@@ -5424,8 +5477,13 @@ eventSource.on(event_types.MESSAGE_SENT, onHostMessageSent);
 eventSource.on(event_types.MESSAGE_RECEIVED, onHostMessageReceived);
 eventSource.on(event_types.MESSAGE_EDITED, onHostMessageEdited);
 eventSource.on(event_types.MESSAGE_UPDATED, onHostMessageEdited);
+eventSource.on(
+    event_types.CONNECTION_PROFILE_UPDATED,
+    protectUpstreamConnectionProfile,
+);
 
 settings();
+protectUpstreamConnectionProfile();
 installPreSquashCapture();
 clearInjections();
 refreshChatSnapshot();

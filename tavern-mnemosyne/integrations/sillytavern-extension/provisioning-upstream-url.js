@@ -1,7 +1,21 @@
-function isLoopbackEndpoint(url) {
+const LOOPBACK_HOSTS =
+  new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
+
+function effectivePort(url) {
+  if (url.port) return url.port;
+  return url.protocol === 'https:' ? '443' : '80';
+}
+
+function isLocalRuntimeEndpoint(url, runtimeUrl) {
   try {
-    return ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(
-      new URL(url).hostname,
+    const parsed = new URL(url);
+    const runtime = new URL(runtimeUrl);
+    return (
+      LOOPBACK_HOSTS.has(parsed.hostname)
+      && LOOPBACK_HOSTS.has(runtime.hostname)
+      && effectivePort(parsed) === effectivePort(runtime)
+      && parsed.pathname.replace(/\/+$/, '')
+        === runtime.pathname.replace(/\/+$/, '')
     );
   } catch {
     return false;
@@ -20,9 +34,10 @@ export function resolveProvisioningUpstreamUrl({
   currentUrl,
   persistedUrl,
   installedRuntimeUrl = '',
+  runtimeUrl = 'http://127.0.0.1:18991/v1',
 }) {
   const candidate = String(currentUrl ?? '').trim();
-  if (candidate && !isLoopbackEndpoint(candidate)) {
+  if (candidate && !isLocalRuntimeEndpoint(candidate, runtimeUrl)) {
     return Object.freeze({
       upstreamUrl: candidate,
       snapshotUrl: candidate === persistedUrl ? null : candidate,
@@ -30,7 +45,7 @@ export function resolveProvisioningUpstreamUrl({
   }
 
   const snapshot = String(persistedUrl ?? '').trim();
-  if (snapshot && !isLoopbackEndpoint(snapshot)) {
+  if (snapshot && !isLocalRuntimeEndpoint(snapshot, runtimeUrl)) {
     return Object.freeze({
       upstreamUrl: snapshot,
       snapshotUrl: null,
@@ -38,7 +53,7 @@ export function resolveProvisioningUpstreamUrl({
   }
 
   const installed = String(installedRuntimeUrl ?? '').trim();
-  if (installed && !isLoopbackEndpoint(installed)) {
+  if (installed && !isLocalRuntimeEndpoint(installed, runtimeUrl)) {
     return Object.freeze({
       upstreamUrl: installed,
       snapshotUrl: installed,
