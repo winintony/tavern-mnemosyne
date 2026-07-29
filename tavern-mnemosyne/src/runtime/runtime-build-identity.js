@@ -25,6 +25,41 @@ const INCLUDED_TREES = Object.freeze([{
   extensions: new Set(['.js', '.json', '.css']),
 }]);
 
+export function requireSealedRuntimeBuildIdentity({
+  codeRoot,
+  runtimeRoot,
+  configuredBuildId = '',
+} = {}) {
+  if (
+    typeof codeRoot !== 'string'
+    || !path.isAbsolute(codeRoot)
+    || typeof runtimeRoot !== 'string'
+    || !path.isAbsolute(runtimeRoot)
+  ) {
+    throw new TypeError(
+      'Runtime identity roots must be absolute paths.',
+    );
+  }
+  const configured = String(configuredBuildId ?? '').trim();
+  if (configured && !CONFIGURED_BUILD_ID_PATTERN.test(configured)) {
+    throw new TypeError('Configured runtime build id is invalid.');
+  }
+  if (path.resolve(codeRoot) === path.resolve(runtimeRoot)) {
+    return configured || null;
+  }
+  if (!configured) {
+    throw new TypeError(
+      'The sealed runtime build identity was not propagated.',
+    );
+  }
+  if (path.basename(path.resolve(runtimeRoot)) !== configured) {
+    throw new TypeError(
+      'The sealed runtime build identity does not match the verified runtime directory.',
+    );
+  }
+  return configured;
+}
+
 function normalizedRelativePath(packageRoot, filePath) {
   return path.relative(packageRoot, filePath).split(path.sep).join('/');
 }

@@ -29,6 +29,9 @@ import {
 import {
   createMainRuntimeProfileEndpoint,
 } from '../../src/runtime/main-runtime-profile-endpoint.js';
+import {
+  requireSealedRuntimeBuildIdentity,
+} from '../../src/runtime/runtime-build-identity.js';
 
 export const info = Object.freeze({
   id: 'tavern-mnemosyne',
@@ -57,6 +60,11 @@ const launcherPath = path.join(
   ...(runtimeRoot === companionRoot ? ['distribution'] : []),
   'companion-launcher.mjs',
 );
+const runtimeBuildId = requireSealedRuntimeBuildIdentity({
+  codeRoot: companionRoot,
+  runtimeRoot,
+  configuredBuildId: process.env.MNEMOSYNE_RUNTIME_BUILD_ID,
+});
 const configPath = path.join(
   stateRoot,
   'config',
@@ -117,6 +125,9 @@ async function startCompanion(contextAccessToken) {
       MNEMOSYNE_STATE_ROOT: stateRoot,
       MNEMOSYNE_CONFIG_PATH: configPath,
       MNEMOSYNE_PORT: '0',
+      ...(runtimeBuildId
+        ? { MNEMOSYNE_RUNTIME_BUILD_ID: runtimeBuildId }
+        : {}),
     },
     stdio: ['inherit', 'inherit', 'inherit', 'ipc'],
     shell: false,

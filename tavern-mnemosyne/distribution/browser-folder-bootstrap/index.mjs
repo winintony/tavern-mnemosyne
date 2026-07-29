@@ -517,6 +517,7 @@ async function resolveBinding() {
   return Object.freeze({
     codeRoot: nestedRoot,
     runtimeRoot,
+    runtimeBuildId: binding.runtime_build_id,
     stateRoot,
     serverEntry,
   });
@@ -529,6 +530,8 @@ async function plugin() {
   const resolved = await resolveBinding();
   process.env.MNEMOSYNE_CODE_ROOT = resolved.codeRoot;
   process.env.MNEMOSYNE_RUNTIME_ROOT = resolved.runtimeRoot;
+  process.env.MNEMOSYNE_RUNTIME_BUILD_ID =
+    resolved.runtimeBuildId;
   process.env.MNEMOSYNE_STATE_ROOT = resolved.stateRoot;
   process.env.MNEMOSYNE_CONFIG_PATH = path.join(
     resolved.stateRoot,

@@ -1,6 +1,6 @@
 {
   "name": "tavern-mnemosyne-server-plugin",
-  "version": "0.2.10",
+  "version": "0.2.11",
   "private": true,
   "type": "module",
   "main": "tavern-mnemosyne/distribution/server-plugin/index.mjs",
