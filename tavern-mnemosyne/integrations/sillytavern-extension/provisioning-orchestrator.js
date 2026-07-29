@@ -75,8 +75,25 @@ export function createProvisioningOrchestrator({
         return expected;
     }
 
-    async function inspect({
+    async function attestReadyLease(lease, {
         explicit = false,
+        expectedBuildId = null,
+    } = {}) {
+        if (
+            expectedBuildId
+            && lease?.runtime_build_id !== expectedBuildId
+        ) {
+            throw orchestratorError(
+                'browser_folder_runtime_build_mismatch',
+                'The running Mnemosyne build is not the shipped build.',
+            );
+        }
+        await validateReadyLease(lease, { explicit });
+        return lease;
+    }
+
+    async function inspect({
+        explicit = true,
     } = {}) {
         try {
             const lease = await controlClient.resolveRootTransport();
@@ -84,7 +101,18 @@ export function createProvisioningOrchestrator({
             const adapter = lease.adapter_id === 'bridge'
                 ? 'server'
                 : 'existing-loopback';
-            if (expected && lease.runtime_build_id !== expected) {
+            try {
+                await attestReadyLease(lease, {
+                    explicit,
+                    expectedBuildId: expected,
+                });
+            } catch (error) {
+                if (
+                    error?.reasonCode
+                        !== 'browser_folder_runtime_build_mismatch'
+                ) {
+                    throw error;
+                }
                 const eligibility = browserFolderEligibility({
                     pageUrl,
                     secureContext,
@@ -104,7 +132,6 @@ export function createProvisioningOrchestrator({
                         : { reason_code: eligibility.reason_code }),
                 });
             }
-            await validateReadyLease(lease, { explicit });
             return Object.freeze({
                 status: 'ready',
                 adapter,
@@ -148,10 +175,15 @@ export function createProvisioningOrchestrator({
     } = {}) {
         const startedAt = Date.now();
         let lastError = null;
+        const expected = await expectedRuntimeBuildId();
         do {
             try {
                 const lease = await controlClient.resolveRootTransport({
                     force: true,
+                });
+                await attestReadyLease(lease, {
+                    explicit: true,
+                    expectedBuildId: expected,
                 });
                 return Object.freeze({
                     status: 'ready',

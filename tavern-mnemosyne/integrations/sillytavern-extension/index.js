@@ -167,7 +167,6 @@ import {
 import {
     createBrowserFolderRuntimeConfig,
     localRuntimeProxyUrl,
-    readInstalledBrowserFolderRuntimeConfig,
 } from './browser-folder-provisioning.js';
 import {
     createProvisioningOrchestrator,
@@ -684,16 +683,6 @@ function interactiveIntentStillCurrent(intent) {
 async function ensureSelectedMainRuntimeProfile() {
     const desiredProfile =
         await selectedMainRuntimeProfile();
-    if (!upstreamConnectionLease.captureSelectedProfile(
-        desiredProfile.upstream_url,
-        configuredRuntimeProxyUrl(),
-        desiredProfile.upstream_model,
-    )) {
-        throw new ExtensionOperationError(
-            'runtime_profile_connection_invalid',
-            'The selected connection profile could not be leased.',
-        );
-    }
     const activation =
         await mainRuntimeProfileRouter.ensure(desiredProfile);
     if (activation.status !== 'ready') {
@@ -1462,6 +1451,16 @@ async function mainRuntimeProfileForBinding({
 async function selectedMainRuntimeProfile() {
     protectUpstreamConnectionProfile();
     const selectedProfile = selectedConnectionProfile();
+    if (!upstreamConnectionLease.captureSelectedProfile(
+        selectedProfile?.['api-url'],
+        configuredRuntimeProxyUrl(),
+        selectedProfile?.model,
+    )) {
+        throw new ExtensionOperationError(
+            'runtime_profile_connection_invalid',
+            'The selected connection profile could not be leased.',
+        );
+    }
     return mainRuntimeProfileForBinding({
         upstreamUrl: selectedProfile?.['api-url'],
         upstreamModel: selectedProfile?.model,
@@ -5365,41 +5364,7 @@ async function requireSuccessfulText(response, description) {
     return response.text();
 }
 
-async function resolveCurrentProvisioningUpstreamUrl(
-    presetCustomUrl,
-    rootHandle,
-    currentModel,
-) {
-    try {
-        return upstreamConnectionLease.resolveForProvisioning({
-            currentUrl: presetCustomUrl,
-            currentModel,
-            runtimeUrl: configuredRuntimeProxyUrl(),
-        });
-    } catch (error) {
-        if (
-            error?.reasonCode
-                !== 'browser_folder_upstream_url_invalid'
-            || !rootHandle
-        ) {
-            throw error;
-        }
-        const installed =
-            await readInstalledBrowserFolderRuntimeConfig(rootHandle);
-        return upstreamConnectionLease.resolveForProvisioning({
-            currentUrl: presetCustomUrl,
-            currentModel,
-            installedRuntimeUrl: installed?.upstreamBaseUrl,
-            installedRuntimeModel: installed?.upstreamModel,
-            runtimeUrl: configuredRuntimeProxyUrl(),
-        });
-    }
-}
-
-async function browserFolderProvisioningInput({
-    rootHandle,
-    explicit = false,
-} = {}) {
+async function browserFolderProvisioningInput() {
     const preset = getChatCompletionPreset();
     if (
         main_api !== 'openai'
@@ -5442,38 +5407,8 @@ async function browserFolderProvisioningInput({
                 'Mnemosyne bootstrap',
             ),
         ]);
-    const liveHostBinding = currentHostBinding();
-    let provisioningBinding = null;
-    if (explicit) {
-        const installed =
-            await readInstalledBrowserFolderRuntimeConfig(rootHandle);
-        provisioningBinding =
-            upstreamConnectionLease
-                .resolveExplicitProvisioningBinding({
-                    currentUrl: preset.custom_url,
-                    currentModel: liveHostBinding.model,
-                    installedRuntimeUrl:
-                        installed?.upstreamBaseUrl,
-                    installedRuntimeModel:
-                        installed?.upstreamModel,
-                    runtimeUrl: configuredRuntimeProxyUrl(),
-                });
-    }
-    const upstreamUrl =
-        provisioningBinding?.upstreamUrl
-        ?? await resolveCurrentProvisioningUpstreamUrl(
-            preset.custom_url,
-            rootHandle,
-            liveHostBinding.model,
-        );
-    const upstreamModel =
-        provisioningBinding?.upstreamModel
-        ?? liveHostBinding.model;
     const mainRuntimeProfile =
-        await mainRuntimeProfileForBinding({
-            upstreamUrl,
-            upstreamModel,
-        });
+        await selectedMainRuntimeProfile();
     return Object.freeze({
         hostVersion: hostVersion.pkgVersion,
         expectedExtensionVersion: extensionManifest.version,
@@ -5515,19 +5450,33 @@ function currentProvisioningOrchestrator() {
         controlClient: currentControlClient(),
         loadBrowserFolderInput: browserFolderProvisioningInput,
         loadExpectedRuntimeBuildId: shippedRuntimeBuildId,
-        validateReadyLease: (lease, {
+        validateReadyLease: async (lease, {
             explicit = false,
-        } = {}) =>
-            upstreamConnectionLease.assertRuntimeBinding({
+        } = {}) => {
+            const capabilities =
+                currentControlClient().capabilitiesForLease(lease);
+            await upstreamConnectionLease.assertRuntimeBinding({
                 expectedProviderContextTokens:
                     Number(oai_settings.openai_max_context),
                 expectedProviderOutputReserveTokens:
                     Number(oai_settings.openai_max_tokens),
                 requireSelectedProfile: explicit,
-                runtimeCapabilities:
-                    currentControlClient().capabilitiesForLease(lease),
+                runtimeCapabilities: capabilities,
                 runtimeLease: lease,
-            }),
+            });
+            if (!explicit) return;
+            const desiredProfile =
+                await selectedMainRuntimeProfile();
+            if (
+                capabilities.active_main_runtime_profile_hash
+                    !== desiredProfile.profile_hash
+            ) {
+                throw new ExtensionOperationError(
+                    'runtime_profile_activation_mismatch',
+                    'The installed runtime profile is not the selected profile.',
+                );
+            }
+        },
     });
 }
 
