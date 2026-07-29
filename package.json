@@ -1,8 +1,12 @@
 {
   "name": "tavern-mnemosyne-server-plugin",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "private": true,
   "type": "module",
   "main": "tavern-mnemosyne/distribution/server-plugin/index.mjs",
-  "description": "SillyTavern server plugin that manages the Tavern Mnemosyne Companion."
+  "description": "SillyTavern server plugin that manages the Tavern Mnemosyne Companion.",
+  "scripts": {
+    "governance-check": "node scripts/governance/check-design-traceability.mjs",
+    "governance-check:test": "node --test scripts/governance/check-design-traceability.test.js"
+  }
 }

@@ -14,6 +14,28 @@ function isDeepSeekV4ThinkingEndpoint({
   );
 }
 
+export function createDeepSeekV4ToolCallRetryRequest({
+  requestBody,
+  endpoint,
+  toolChoice,
+}) {
+  if (!isDeepSeekV4ThinkingEndpoint({
+    endpoint,
+    model: requestBody?.model,
+  })) {
+    return null;
+  }
+  return {
+    ...structuredClone(requestBody),
+    thinking: { type: 'disabled' },
+    tool_choice: (
+      toolChoice == null || toolChoice === ''
+        ? 'required'
+        : structuredClone(toolChoice)
+    ),
+  };
+}
+
 export function adaptOpenAiCompatibleRequest({
   requestBody,
   endpoint,

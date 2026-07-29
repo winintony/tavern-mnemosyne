@@ -3,6 +3,7 @@ import {
   resolveHostComponentProvenance,
   validateHostComponentProvenance,
 } from './host-provenance-adapter.js';
+import { censusMark } from './gate-census.js';
 
 const RAW_SOURCE_LABELS = new Map([
   ['worldInfoBefore', 'raw_worldbook'],
@@ -52,6 +53,13 @@ const HOST_HISTORY_COORDINATE_BASIS_SCHEMA =
 const FOREIGN_DRY_FRAME_PATTERN =
   /<mnemosyne-foreign-dry-frame data-frame-id="([A-Za-z0-9._:-]+)" data-owner-run-id="([A-Za-z0-9._:-]+)">/g;
 const HASH_PATTERN = /^[a-f0-9]{64}$/;
+const HOST_TRANSFORM_FENCE_SCHEMA =
+  'mnemosyne.host-transform-fence-lease.v1';
+const HOST_TRANSFORM_OVERRIDE_SCHEMA =
+  'mnemosyne.host-transform-span-override.v1';
+const HOST_TRANSFORM_MARKER_PREFIX =
+  '\uE100MNEMOSYNE-HOST-TRANSFORM:';
+const HOST_TRANSFORM_MARKER_SUFFIX = ':\uE101';
 const CERTIFICATE_ID_PATTERN = /^coverage_[a-f0-9]{24}$/;
 const SOURCE_REMOVAL_GRANT_SCHEMA =
   'mnemosyne.source-removal-grant.v3';
@@ -278,6 +286,7 @@ export function buildGenerationRunScope({
   nestedGeneration = false,
   lastMessageRole = null,
 }) {
+  censusMark('PROMPT_HISTORY_RUN_BINDING', 'enter', { runId: null });
   const invalidField = (
     typeof chatId !== 'string' || !chatId
       ? 'chat_id'
@@ -345,6 +354,7 @@ export function buildGenerationRunScope({
   const preservesSwipeCoordinate = [
     'swipe',
   ].includes(generationType);
+  censusMark('PROMPT_HISTORY_RUN_BINDING', 'passed', { runId: null });
   return {
     chat_id: chatId,
     branch_epoch: branchEpoch,
@@ -500,6 +510,71 @@ function normalizedHostSwipeId(message) {
     : null;
 }
 
+export function inspectCurrentCardGreeting(
+  message,
+  {
+    name,
+    greetings,
+    expandMacros,
+  } = {},
+) {
+  if (
+    !message
+    || typeof message !== 'object'
+    || Array.isArray(message)
+    || message.is_user !== false
+    || message.is_system !== false
+    || message.force_avatar === true
+    || typeof name !== 'string'
+    || !name
+    || String(message.name ?? '') !== name
+    || !Array.isArray(greetings)
+    || greetings.length === 0
+    || greetings.some(value => typeof value !== 'string')
+    || typeof expandMacros !== 'function'
+  ) {
+    return null;
+  }
+  const swipeId = normalizedHostSwipeId(message);
+  if (
+    !Number.isInteger(swipeId)
+    || swipeId < 0
+    || swipeId >= greetings.length
+  ) {
+    return null;
+  }
+  if (
+    Array.isArray(message.swipes)
+      ? (
+        message.swipes.length !== greetings.length
+        || message.swipes.some(
+          (value, index) => String(value ?? '') !== greetings[index],
+        )
+      )
+      : greetings.length !== 1
+  ) {
+    return null;
+  }
+  const rawGreeting = greetings[swipeId];
+  const expandedGreeting = String(expandMacros(rawGreeting));
+  const currentContent = String(message.mes ?? '');
+  if (
+    currentContent !== rawGreeting
+    && currentContent !== expandedGreeting
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    swipe_id: swipeId,
+    raw_greeting: rawGreeting,
+    expanded_greeting: expandedGreeting,
+    is_macro_expansion: (
+      rawGreeting !== expandedGreeting
+      && currentContent === expandedGreeting
+    ),
+  });
+}
+
 function stableAssistantCandidateInventory(message) {
   const swipeId = normalizedHostSwipeId(message);
   if (swipeId === null) return canonicalJson([]);
@@ -551,10 +626,27 @@ function stableAssistantCandidateInventory(message) {
   ));
 }
 
-export function snapshotHostHistory(chat) {
+export function snapshotHostHistory(
+  chat,
+  {
+    currentCard = null,
+  } = {},
+) {
   if (!Array.isArray(chat)) return [];
   return chat.map((message, index) => {
-    const normalized = normalizeHostMessageForSnapshot(message);
+    let normalized = normalizeHostMessageForSnapshot(message);
+    if (index === 0 && currentCard !== null) {
+      const greeting = inspectCurrentCardGreeting(
+        normalized,
+        currentCard,
+      );
+      if (greeting) {
+        normalized = {
+          ...normalized,
+          mes: greeting.raw_greeting,
+        };
+      }
+    }
     const stableExtra = promptBearingExtra(normalized.extra);
     return canonicalJson({
       index,
@@ -663,11 +755,95 @@ function stableHostHistoryCoordinate(entry) {
   }
 }
 
+function stableHostHistoryCoordinateVariants(
+  entry,
+  {
+    currentCard = null,
+  } = {},
+) {
+  // Legacy checkpoints may have sealed #0 after SillyTavern expanded its
+  // greeting macros. Keep raw/expanded as comparison-only coordinates, and
+  // expose them only after this entry independently proves the exact current
+  // card, role, swipe, and greeting identity.
+  const coordinate = stableHostHistoryCoordinate(entry);
+  if (!coordinate || currentCard === null) {
+    return coordinate ? [coordinate] : null;
+  }
+
+  try {
+    const parsed = JSON.parse(entry);
+    if (
+      parsed.index !== 0
+      || parsed.is_user !== false
+      || parsed.is_system !== false
+      || parsed.force_avatar !== false
+      || parsed.content
+        !== String(parsed.message.mes ?? '')
+    ) {
+      return [coordinate];
+    }
+    const greeting = inspectCurrentCardGreeting(
+      parsed.message,
+      currentCard,
+    );
+    if (
+      !greeting
+      || parsed.speaker_name !== currentCard.name
+      || parsed.swipe_id !== greeting.swipe_id
+    ) {
+      return [coordinate];
+    }
+
+    const variants = [
+      greeting.raw_greeting,
+      greeting.expanded_greeting,
+    ].map(content => stableHostHistoryCoordinate(
+      canonicalJson({
+        ...parsed,
+        content,
+        message: {
+          ...parsed.message,
+          mes: content,
+        },
+      }),
+    ));
+    if (variants.some(value => value === null)) {
+      return null;
+    }
+    return [...new Set(variants)];
+  } catch {
+    return null;
+  }
+}
+
+function stableHostHistoryCoordinatesMatch(
+  previousEntry,
+  currentEntry,
+  {
+    currentCard = null,
+  } = {},
+) {
+  const previous = stableHostHistoryCoordinateVariants(
+    previousEntry,
+    { currentCard },
+  );
+  const current = stableHostHistoryCoordinateVariants(
+    currentEntry,
+    { currentCard },
+  );
+  if (!previous || !current) return null;
+  const currentCoordinates = new Set(current);
+  return previous.some(
+    coordinate => currentCoordinates.has(coordinate),
+  );
+}
+
 export function findMessageEditCutoff(
   previousSnapshot,
   currentSnapshot,
   {
     expectedMessageIndex,
+    currentCard = null,
   } = {},
 ) {
   if (
@@ -683,16 +859,15 @@ export function findMessageEditCutoff(
 
   let firstChangedIndex = null;
   for (let index = 0; index < currentSnapshot.length; index += 1) {
-    const previous = stableHostHistoryCoordinate(
+    const matches = stableHostHistoryCoordinatesMatch(
       previousSnapshot[index],
-    );
-    const current = stableHostHistoryCoordinate(
       currentSnapshot[index],
+      { currentCard },
     );
-    if (!previous || !current) {
+    if (matches === null) {
       throw new Error('Message edit history coordinates are invalid.');
     }
-    if (firstChangedIndex === null && previous !== current) {
+    if (firstChangedIndex === null && !matches) {
       firstChangedIndex = index;
     }
   }
@@ -703,6 +878,9 @@ export function findMessageEditCutoff(
 export function findHostHistoryInvalidationCutoff(
   previousSnapshot,
   currentSnapshot,
+  {
+    currentCard = null,
+  } = {},
 ) {
   if (
     !Array.isArray(previousSnapshot)
@@ -715,16 +893,15 @@ export function findHostHistoryInvalidationCutoff(
     currentSnapshot.length,
   );
   for (let index = 0; index < sharedLength; index += 1) {
-    const previous = stableHostHistoryCoordinate(
+    const matches = stableHostHistoryCoordinatesMatch(
       previousSnapshot[index],
-    );
-    const current = stableHostHistoryCoordinate(
       currentSnapshot[index],
+      { currentCard },
     );
-    if (!previous || !current) {
+    if (matches === null) {
       throw new Error('Host history snapshots are invalid.');
     }
-    if (previous !== current) return index;
+    if (!matches) return index;
   }
   return currentSnapshot.length < previousSnapshot.length
     ? currentSnapshot.length
@@ -736,6 +913,7 @@ export function findMessageDeletionCutoff(
   currentSnapshot,
   {
     expectedRemainingLength,
+    currentCard = null,
   } = {},
 ) {
   if (
@@ -753,13 +931,12 @@ export function findMessageDeletionCutoff(
     currentSnapshot.length,
   );
   for (let index = 0; index < sharedLength; index += 1) {
-    const previous = stableHostHistoryCoordinate(
+    const matches = stableHostHistoryCoordinatesMatch(
       previousSnapshot[index],
-    );
-    const current = stableHostHistoryCoordinate(
       currentSnapshot[index],
+      { currentCard },
     );
-    if (!previous || !current || previous !== current) {
+    if (matches !== true) {
       return index;
     }
   }
@@ -1440,25 +1617,49 @@ export async function findGovernedHistoryInvalidationCutoff({
   checkpoint,
   chatId,
   currentHostHistorySnapshot,
+  currentCard = null,
 } = {}) {
   const governed =
     await assertGovernedHistoryCheckpoint(
       checkpoint,
       { chatId },
     );
-  const currentHashes =
-    await stableHostHistoryHashes(currentHostHistorySnapshot);
+  if (!Array.isArray(currentHostHistorySnapshot)) {
+    throw historyCheckpointError(
+      'A governed history checkpoint requires a host snapshot.',
+    );
+  }
+  const currentHashVariants = [];
+  for (const entry of currentHostHistorySnapshot) {
+    const variants = stableHostHistoryCoordinateVariants(
+      entry,
+      { currentCard },
+    );
+    if (!variants) {
+      throw historyCheckpointError(
+        'A governed history checkpoint contains an invalid coordinate.',
+      );
+    }
+    currentHashVariants.push(
+      await Promise.all(
+        variants.map(coordinate => sha256(coordinate)),
+      ),
+    );
+  }
   const sharedLength = Math.min(
     governed.message_count,
-    currentHashes.length,
+    currentHashVariants.length,
   );
   for (let index = 0; index < sharedLength; index += 1) {
-    if (governed.message_hashes[index] !== currentHashes[index]) {
+    if (
+      !currentHashVariants[index]
+        .includes(governed.message_hashes[index])
+    ) {
       return index;
     }
   }
-  return currentHashes.length < governed.message_count
-    ? currentHashes.length
+  return currentHashVariants.length < governed.message_count
+    ? currentHashVariants.length
     : null;
 }
 
@@ -2775,6 +2976,403 @@ export async function hashPromptMessageShape(message) {
   return matchingHash(message);
 }
 
+class HostTransformFenceError extends Error {
+  constructor(reasonCode, message) {
+    super(message);
+    this.name = 'HostTransformFenceError';
+    this.reasonCode = reasonCode;
+  }
+}
+
+function hostTransformFenceError(reasonCode, message) {
+  return new HostTransformFenceError(reasonCode, message);
+}
+
+function messageTextOccurrences(messages, text) {
+  const occurrences = [];
+  for (
+    let messageIndex = 0;
+    messageIndex < messages.length;
+    messageIndex += 1
+  ) {
+    const content = messages[messageIndex]?.content;
+    if (typeof content !== 'string') continue;
+    let start = content.indexOf(text);
+    while (start >= 0) {
+      occurrences.push({ messageIndex, start });
+      start = content.indexOf(text, start + 1);
+    }
+  }
+  return occurrences;
+}
+
+function safeFenceId(randomUUID) {
+  const value = String(randomUUID?.() ?? '')
+    .trim()
+    .replace(/[^A-Za-z0-9_-]/g, '');
+  if (!value) {
+    throw hostTransformFenceError(
+      'host_transform_fence_nonce_invalid',
+      'Host transform fencing requires a non-empty random lease id.',
+    );
+  }
+  return value;
+}
+
+function assertNonOverlappingFenceSpans(entries, {
+  startKey,
+  endKey,
+  messageKey,
+  reasonCode,
+}) {
+  const byMessage = new Map();
+  for (const entry of entries) {
+    const messageIndex = entry[messageKey];
+    const spans = byMessage.get(messageIndex) ?? [];
+    spans.push(entry);
+    byMessage.set(messageIndex, spans);
+  }
+  for (const spans of byMessage.values()) {
+    spans.sort((left, right) => (
+      left[startKey] - right[startKey]
+      || left[endKey] - right[endKey]
+    ));
+    for (let index = 1; index < spans.length; index += 1) {
+      if (spans[index][startKey] < spans[index - 1][endKey]) {
+        throw hostTransformFenceError(
+          reasonCode,
+          'Host transform source fences overlap or nest.',
+        );
+      }
+    }
+  }
+}
+
+export async function createHostTransformFenceLease({
+  workingMessages,
+  internalMessages,
+  promptTrace,
+  randomUUID = () => globalThis.crypto.randomUUID(),
+} = {}) {
+  if (
+    !Array.isArray(workingMessages)
+    || !Array.isArray(internalMessages)
+    || !Array.isArray(promptTrace?.prompt_manager?.entries)
+    || typeof promptTrace?.run_id !== 'string'
+    || !promptTrace.run_id
+  ) {
+    throw hostTransformFenceError(
+      'host_transform_fence_input_invalid',
+      'Host transform fencing requires one exact prompt trace.',
+    );
+  }
+  const candidates = promptTrace.prompt_manager.entries.filter(entry => (
+    entry?.retention_policy === 'retain'
+    && RAW_AUTHOR_SOURCE_LABELS.has(entry?.source_label)
+    && entry?.component_provenance
+    && Number.isInteger(entry.provider_index)
+    && Number.isInteger(entry.provider_content_start)
+    && Number.isInteger(entry.provider_content_end)
+  ));
+  if (candidates.length === 0) {
+    return {
+      messages: structuredClone(workingMessages),
+      lease: null,
+    };
+  }
+
+  const leaseId = safeFenceId(randomUUID);
+  const entries = [];
+  for (const candidate of candidates) {
+    const internal = internalMessages[candidate.order];
+    const internalContent = internal?.content;
+    const providerContent =
+      workingMessages[candidate.provider_index]?.content;
+    const start = candidate.provider_content_start;
+    const end = candidate.provider_content_end;
+    if (
+      typeof internalContent !== 'string'
+      || internalContent.length === 0
+      || typeof providerContent !== 'string'
+      || start < 0
+      || end <= start
+      || end > providerContent.length
+      || providerContent.slice(start, end) !== internalContent
+      || await matchingHash(internal)
+        !== candidate.prompt_message_hash
+    ) {
+      throw hostTransformFenceError(
+        'host_transform_fence_source_drift',
+        'A retained author source lost its exact pre-transform span.',
+      );
+    }
+    const markerBase = (
+      `${HOST_TRANSFORM_MARKER_PREFIX}${leaseId}:`
+      + `${candidate.order}`
+    );
+    const startMarker = `${markerBase}:START${HOST_TRANSFORM_MARKER_SUFFIX}`;
+    const endMarker = `${markerBase}:END${HOST_TRANSFORM_MARKER_SUFFIX}`;
+    if (
+      workingMessages.some(message => (
+        typeof message?.content === 'string'
+        && (
+          message.content.includes(startMarker)
+          || message.content.includes(endMarker)
+        )
+      ))
+    ) {
+      throw hostTransformFenceError(
+        'host_transform_fence_marker_collision',
+        'A host transform fence marker already exists in the prompt.',
+      );
+    }
+    entries.push({
+      identifier: candidate.identifier,
+      source_label: candidate.source_label,
+      internal_order: candidate.order,
+      role: candidate.role,
+      name: candidate.name ?? null,
+      original_prompt_message_hash:
+        candidate.prompt_message_hash,
+      message_index: candidate.provider_index,
+      start,
+      end,
+      start_marker: startMarker,
+      end_marker: endMarker,
+    });
+  }
+  assertNonOverlappingFenceSpans(entries, {
+    startKey: 'start',
+    endKey: 'end',
+    messageKey: 'message_index',
+    reasonCode: 'host_transform_fence_span_overlap',
+  });
+
+  const messages = structuredClone(workingMessages);
+  const byMessage = new Map();
+  for (const entry of entries) {
+    const spans = byMessage.get(entry.message_index) ?? [];
+    spans.push(entry);
+    byMessage.set(entry.message_index, spans);
+  }
+  for (const [messageIndex, spans] of byMessage) {
+    spans.sort((left, right) => right.start - left.start);
+    let content = messages[messageIndex].content;
+    for (const span of spans) {
+      if (content.slice(span.start, span.end)
+        !== internalMessages[span.internal_order].content) {
+        throw hostTransformFenceError(
+          'host_transform_fence_source_drift',
+          'A retained author source changed while fences were installed.',
+        );
+      }
+      content = (
+        content.slice(0, span.start)
+        + span.start_marker
+        + content.slice(span.start, span.end)
+        + span.end_marker
+        + content.slice(span.end)
+      );
+    }
+    messages[messageIndex].content = content;
+  }
+
+  return {
+    messages,
+    lease: Object.freeze({
+      schema: HOST_TRANSFORM_FENCE_SCHEMA,
+      run_id: promptTrace.run_id,
+      lease_id: leaseId,
+      entries: Object.freeze(
+        entries.map(entry => Object.freeze({ ...entry })),
+      ),
+    }),
+  };
+}
+
+export async function restoreHostTransformFenceLease({
+  workingMessages,
+  lease,
+} = {}) {
+  if (
+    !Array.isArray(workingMessages)
+    || lease?.schema !== HOST_TRANSFORM_FENCE_SCHEMA
+    || typeof lease.run_id !== 'string'
+    || !lease.run_id
+    || !Array.isArray(lease.entries)
+    || lease.entries.length === 0
+  ) {
+    throw hostTransformFenceError(
+      'host_transform_fence_lease_invalid',
+      'Host transform restoration requires one active fence lease.',
+    );
+  }
+
+  const observed = [];
+  for (const entry of lease.entries) {
+    const startMatches = messageTextOccurrences(
+      workingMessages,
+      entry.start_marker,
+    );
+    const endMatches = messageTextOccurrences(
+      workingMessages,
+      entry.end_marker,
+    );
+    if (startMatches.length !== 1 || endMatches.length !== 1) {
+      throw hostTransformFenceError(
+        startMatches.length === 0 || endMatches.length === 0
+          ? 'host_transform_fence_marker_missing'
+          : 'host_transform_fence_marker_ambiguous',
+        'A host transform fence was not preserved exactly once.',
+      );
+    }
+    const startMatch = startMatches[0];
+    const endMatch = endMatches[0];
+    const message = workingMessages[startMatch.messageIndex];
+    const bodyStart =
+      startMatch.start + entry.start_marker.length;
+    const bodyEnd = endMatch.start;
+    if (
+      startMatch.messageIndex !== endMatch.messageIndex
+      || bodyEnd <= bodyStart
+      || message?.role !== entry.role
+      || (message?.name ?? null) !== entry.name
+    ) {
+      throw hostTransformFenceError(
+        'host_transform_fence_coordinate_drift',
+        'A host transform fence changed role, order, or message boundary.',
+      );
+    }
+    observed.push({
+      ...entry,
+      message_index: startMatch.messageIndex,
+      marker_start: startMatch.start,
+      body_start: bodyStart,
+      body_end: bodyEnd,
+      marker_end:
+        endMatch.start + entry.end_marker.length,
+    });
+  }
+  assertNonOverlappingFenceSpans(observed, {
+    startKey: 'marker_start',
+    endKey: 'marker_end',
+    messageKey: 'message_index',
+    reasonCode: 'host_transform_fence_coordinate_drift',
+  });
+
+  const markersByMessage = new Map();
+  for (const entry of observed) {
+    const markers = markersByMessage.get(entry.message_index) ?? [];
+    markers.push(
+      {
+        position: entry.marker_start,
+        text: entry.start_marker,
+      },
+      {
+        position: entry.body_end,
+        text: entry.end_marker,
+      },
+    );
+    markersByMessage.set(entry.message_index, markers);
+  }
+  const messages = structuredClone(workingMessages);
+  for (const [messageIndex, markers] of markersByMessage) {
+    markers.sort((left, right) => right.position - left.position);
+    let content = messages[messageIndex].content;
+    for (const marker of markers) {
+      if (
+        content.slice(
+          marker.position,
+          marker.position + marker.text.length,
+        ) !== marker.text
+      ) {
+        throw hostTransformFenceError(
+          'host_transform_fence_marker_drift',
+          'A host transform fence changed during restoration.',
+        );
+      }
+      content = (
+        content.slice(0, marker.position)
+        + content.slice(marker.position + marker.text.length)
+      );
+    }
+    messages[messageIndex].content = content;
+  }
+
+  const overrides = [];
+  for (const entry of observed) {
+    const markers = markersByMessage.get(entry.message_index);
+    const removedBeforeStart = markers
+      .filter(marker => marker.position < entry.body_start)
+      .reduce((total, marker) => total + marker.text.length, 0);
+    const removedBeforeEnd = markers
+      .filter(marker => marker.position < entry.body_end)
+      .reduce((total, marker) => total + marker.text.length, 0);
+    const start = entry.body_start - removedBeforeStart;
+    const end = entry.body_end - removedBeforeEnd;
+    const message = messages[entry.message_index];
+    const content = message?.content;
+    if (
+      typeof content !== 'string'
+      || start < 0
+      || end <= start
+      || end > content.length
+      || content.includes(entry.start_marker)
+      || content.includes(entry.end_marker)
+    ) {
+      throw hostTransformFenceError(
+        'host_transform_fence_output_invalid',
+        'A host transform produced an invalid retained source span.',
+      );
+    }
+    overrides.push({
+      schema: HOST_TRANSFORM_OVERRIDE_SCHEMA,
+      run_id: lease.run_id,
+      identifier: entry.identifier,
+      source_label: entry.source_label,
+      internal_order: entry.internal_order,
+      original_prompt_message_hash:
+        entry.original_prompt_message_hash,
+      provider_index: entry.message_index,
+      provider_content_start: start,
+      provider_content_end: end,
+      transformed_prompt_message_hash:
+        await matchingHash({
+          role: entry.role,
+          name: entry.name,
+          content: content.slice(start, end),
+        }),
+    });
+  }
+  const byInternalOrder = [...overrides].sort((
+    left,
+    right,
+  ) => left.internal_order - right.internal_order);
+  const byProviderCoordinate = [...overrides].sort((
+    left,
+    right,
+  ) => (
+    left.provider_index - right.provider_index
+    || left.provider_content_start - right.provider_content_start
+  ));
+  if (
+    canonicalJson(byInternalOrder.map(entry => entry.internal_order))
+      !== canonicalJson(
+        byProviderCoordinate.map(entry => entry.internal_order),
+      )
+  ) {
+    throw hostTransformFenceError(
+      'host_transform_fence_coordinate_drift',
+      'Host transform source fences changed their stable order.',
+    );
+  }
+
+  return {
+    messages,
+    overrides,
+  };
+}
+
 export async function hashProviderMessage(message) {
   return sha256(canonicalJson(message));
 }
@@ -3315,6 +3913,10 @@ export function inspectHostProfile({
     reasonCode = 'main_model_mismatch';
   }
 
+  censusMark('HOST_PROFILE_BUDGET_BINDING', reasonCode ? 'blocked' : 'passed', {
+    reasonCode,
+    runId: null,
+  });
   return {
     status: reasonCode ? 'blocked' : 'ready',
     reason_code: reasonCode,
@@ -4172,6 +4774,7 @@ export async function buildPromptTrace({
   sourceRemovalAuthorizations = [],
   sourceCoverage = null,
   sourceRouteOverrides = [],
+  sourceTransformOverrides = [],
   componentProvenance = [],
   unresolvedAbsorbedSources = [],
   hostTransforms = {},
@@ -4184,6 +4787,7 @@ export async function buildPromptTrace({
     !Array.isArray(internalMessages)
     || !Array.isArray(providerMessages)
     || !Array.isArray(sourceRemovalAuthorizations)
+    || !Array.isArray(sourceTransformOverrides)
   ) {
     throw new Error('Prompt trace requires internal and provider message arrays.');
   }
@@ -4726,6 +5330,100 @@ export async function buildPromptTrace({
       candidate.entry.mapping_kind =
         'stable_assistant_suffix';
     }
+  }
+
+  const transformedOrders = new Set();
+  const transformedSpans = [];
+  for (const override of sourceTransformOverrides) {
+    const entry = internalEntries[override?.internal_order];
+    const providerContent =
+      providerMessages[override?.provider_index]?.content;
+    const start = override?.provider_content_start;
+    const end = override?.provider_content_end;
+    if (
+      override?.schema !== HOST_TRANSFORM_OVERRIDE_SCHEMA
+      || override.run_id !== runId
+      || !entry
+      || transformedOrders.has(override.internal_order)
+      || override.identifier !== entry.identifier
+      || override.source_label !== entry.source_label
+      || override.original_prompt_message_hash
+        !== entry.prompt_message_hash
+      || entry.retention_policy !== 'retain'
+      || !RAW_AUTHOR_SOURCE_LABELS.has(entry.source_label)
+      || !entry.component_provenance
+      || !Number.isInteger(override.provider_index)
+      || override.provider_index < 0
+      || override.provider_index >= providerMessages.length
+      || !Number.isInteger(start)
+      || !Number.isInteger(end)
+      || start < 0
+      || end <= start
+      || typeof providerContent !== 'string'
+      || end > providerContent.length
+      || !HASH_PATTERN.test(
+        override.transformed_prompt_message_hash ?? '',
+      )
+      || providerMessages[override.provider_index]?.role
+        !== entry.role
+      || (
+        providerMessages[override.provider_index]?.name
+        ?? null
+      ) !== (entry.name ?? null)
+      || await matchingHash({
+        role: entry.role,
+        name: entry.name ?? null,
+        content: providerContent.slice(start, end),
+      }) !== override.transformed_prompt_message_hash
+    ) {
+      throw hostTransformFenceError(
+        'host_transform_override_invalid',
+        'A fenced host transform override no longer matches its source.',
+      );
+    }
+    const collides = internalEntries.some(other => (
+      other.order !== entry.order
+      && other.provider_index === override.provider_index
+      && Number.isInteger(other.provider_content_start)
+      && Number.isInteger(other.provider_content_end)
+      && start < other.provider_content_end
+      && end > other.provider_content_start
+    )) || transformedSpans.some(other => (
+      other.provider_index === override.provider_index
+      && start < other.end
+      && end > other.start
+    ));
+    if (
+      collides
+      || (
+        Number.isInteger(entry.provider_index)
+        && (
+          entry.provider_index !== override.provider_index
+          || entry.provider_content_start !== start
+          || entry.provider_content_end !== end
+        )
+      )
+    ) {
+      throw hostTransformFenceError(
+        'host_transform_override_ambiguous',
+        'A fenced host transform override overlaps another source.',
+      );
+    }
+    transformedOrders.add(override.internal_order);
+    transformedSpans.push({
+      provider_index: override.provider_index,
+      start,
+      end,
+    });
+    entry.content_hash =
+      override.transformed_prompt_message_hash;
+    entry.prompt_message_hash =
+      override.transformed_prompt_message_hash;
+    entry.provider_index = override.provider_index;
+    entry.provider_content_start = start;
+    entry.provider_content_end = end;
+    entry.mapping_kind = 'fenced_host_transform';
+    entry.mapping_issue = null;
   }
 
   for (const entry of internalEntries) {

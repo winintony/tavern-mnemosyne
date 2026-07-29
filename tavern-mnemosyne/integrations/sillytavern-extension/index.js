@@ -57,20 +57,18 @@ import {
     captureStoryRunLease,
     claimExtensionRuntime,
     classifyPromptReadyOwnership,
-    classifyGovernedHistorySuffix,
     completeDryRunLifecycle,
     createForeignDryFrameCoordinator,
     createGovernedHistoryCheckpoint,
     createHostAssemblyBaseSourceSeal,
     createHostAssemblyBudgetPlan,
+    createHostTransformFenceLease,
     createStoryPromptHistoryBinding,
     createProviderBudgetBinding,
     createForwardingProbeLease,
     createForwardingProbeRequest,
     finalizePromptTrace,
     findUntraceableAbsorbedSources,
-    findGovernedHistoryInvalidationCutoff,
-    findHostHistoryInvalidationCutoff,
     findMessageEditCutoff,
     findMessageDeletionCutoff,
     forwardingProbeResponsePassed,
@@ -88,6 +86,7 @@ import {
     promptMessagesBelongToRun,
     providerInputBudgetFromContext,
     recoverGovernedHistoryCheckpoint,
+    restoreHostTransformFenceLease,
     sealHostHistoryCoordinateBasis,
     shouldReservePendingUserTurn,
     snapshotHostHistory,
@@ -103,14 +102,20 @@ import {
     mergeHistoryInvalidationGuard,
     planHistoryInvalidationResolution,
     reconcileHistoryInvalidationGuard,
-    requiresFreshChatForUncheckpointedHistory,
 } from './history-invalidation-guard.js';
 import {
     createHistoryLifecycleDurableStore,
 } from './history-lifecycle-durable-store.js';
 import {
+    detectUnobservedHistoryInvalidation as observeUnobservedHistoryInvalidation,
+    repairPathologicalGreetingInvalidation,
+} from './history-invalidation-observer.js';
+import {
     createChatSaveInitializationGate,
 } from './chat-save-initialization-gate.js';
+import {
+    runGenerationAdmissionGates,
+} from './generation-admission-gates.js';
 import {
     appendSubjectiveFeedbackNote,
     bindSubjectiveFeedbackNote,
@@ -140,6 +145,9 @@ import {
     runActivityStatusLabel,
 } from './run-activity-controller.js';
 import {
+    createRunStatusFloatController,
+} from './run-status-float.js';
+import {
     createMnemosyneControlClient,
 } from './mnemosyne-control-client.js';
 import {
@@ -157,11 +165,16 @@ import {
     createUpstreamConnectionLease,
 } from './upstream-connection-lease.js';
 import {
+    fetchDistributionArtifact,
+} from './distribution-artifact-location.js';
+import {
+    bindPreparedIntakeHostRequest,
     classifyIntakeModelFailure,
 } from './upstream-request-binding.js';
 import {
-    mergeTransportLeaseIntoCustomBody,
+    mergeResolvedTransportLeaseIntoCustomBody,
 } from './root-transport-lease.js';
+import { censusMark } from './gate-census.js';
 
 claimExtensionRuntime(globalThis);
 
@@ -196,9 +209,11 @@ const state = {
     mainHostBinding: null,
     sourceRemovalAuthorizations: [],
     sourceIsolationLease: null,
+    sourceTransformFenceLease: null,
     preSquashInternalMessages: null,
     generationHistoryOriginCapture: null,
     blockReason: null,
+    pendingBlockStamp: null,
     dryCheckPending: false,
     generationAbortReason: null,
     exclusiveOperation: null,
@@ -397,6 +412,20 @@ function statusDisplayText(value) {
 }
 
 function updateStatus(value) {
+    if (String(value).startsWith('Blocked: ')) {
+        const reasonCode = String(value).slice(9);
+        censusMark('EXTENSION_STATUS_NET', 'collapsed', {
+            reasonCode,
+            runId: state.runId ?? null,
+        });
+        // Single hook point for all Blocked: paths (pre-flight rejects,
+        // blockChatCompletionRequest, exclusive-operation collisions, …):
+        // render it in the float immediately instead of leaving it only in
+        // the settings-drawer text node, which is invisible during a send.
+        if (sendWindowOpen) {
+            runStatusFloatController.onBlocked({ reasonCode });
+        }
+    }
     state.status = value;
     const element = document.querySelector('#tavern_mnemosyne_status');
     if (element) element.textContent = statusDisplayText(value);
@@ -420,10 +449,20 @@ function releaseExclusiveOperation(operation) {
 }
 
 function blockCurrentGeneration(reasonCode) {
+    censusMark('BLOCK_STAMP_PROPAGATION', 'blocked', {
+        reasonCode,
+        runId: state.runId ?? null,
+    });
     state.generationAbortReason = reasonCode;
     clearInjections();
     state.runId = null;
     state.blockReason = reasonCode;
+    // Every block decided before the run marker exists still has a request on
+    // its way to the host. Without this one-shot stamp the finalizer cannot
+    // tell that request apart from another extension's and lets it leave with
+    // no transport binding and no blocked marker at all, which the proxy can
+    // only report as a missing binding.
+    state.pendingBlockStamp = reasonCode;
     updateStatus(`Blocked: ${reasonCode}`);
 }
 
@@ -518,6 +557,15 @@ const runActivityController =
         onChange: activityState =>
             syncRunActivityUi(activityState),
     });
+const runStatusFloatController =
+    createRunStatusFloatController({
+        invoke: chatIdForPoll => fetchRunStatusLive(chatIdForPoll),
+    });
+// Gates updateStatus()'s Blocked: -> runStatusFloatController.onBlocked
+// hookup below so dry-checks and settings-panel buttons (which also route
+// through updateStatus) stay silent; only a real, non-dry send opens the
+// window. See onGenerationStarted/onGenerationFinished/onChatChanged.
+let sendWindowOpen = false;
 const chatSaveInitializationGate =
     createChatSaveInitializationGate({
         isEnabled: () => settings().enabled,
@@ -930,6 +978,15 @@ async function postPrivatePanelRequest(pathname, payload) {
     return invokeControl(methodName, payload);
 }
 
+async function fetchRunStatusLive(chatId) {
+    const lease = await resolveControlLease();
+    return currentControlClient().invoke(
+        'activity/live',
+        { chatId },
+        { lease },
+    );
+}
+
 async function prepareRecentRealUseFeedback() {
     return realUseFeedbackController.prepare();
 }
@@ -1087,10 +1144,12 @@ function clearInjections() {
     state.hostSourceRoutes = {};
     state.sourceRemovalAuthorizations = [];
     state.sourceIsolationLease = null;
+    state.sourceTransformFenceLease = null;
     state.preSquashInternalMessages = null;
     state.generationHistoryOriginCapture = null;
     state.runScope = null;
     state.activeRunMarker = null;
+    state.pendingBlockStamp = null;
     state.transportLease = null;
     state.forwardingProbeLease = null;
 }
@@ -1202,6 +1261,12 @@ function safeProxyBaseUrl() {
 }
 
 function blockChatCompletionRequest(generateData, reasonCode) {
+    // Distinct from the server-side D family: this is a browser-side
+    // pre-block, not the proxy's final collapsed response (P1-2).
+    censusMark('EXTENSION_REQUEST_TERMINAL', 'collapsed', {
+        reasonCode,
+        runId: state.runId ?? null,
+    });
     generateData.chat_completion_source = 'custom';
     generateData.custom_url = `${safeProxyBaseUrl()}/v1`;
     generateData.custom_include_body = JSON.stringify({
@@ -1343,7 +1408,8 @@ async function verifiedHistoryBranchEpoch(
 function refreshChatSnapshot() {
     const context = getContext();
     const chat = context.chat;
-    state.chatSnapshot = snapshotHostHistory(chat);
+    state.chatSnapshot =
+        snapshotCurrentHostHistory(chat);
     state.chatSnapshotChatId = context.chatId ?? null;
     return state.chatSnapshot;
 }
@@ -1799,7 +1865,7 @@ function hostReleaseLengthForInvalidation(
 
 function currentCardGreetings() {
     const character = characters[this_chid];
-    return [
+    const greetings = [
         character?.first_mes ?? '',
         ...(Array.isArray(
             character?.data?.alternate_greetings,
@@ -1811,6 +1877,27 @@ function currentCardGreetings() {
             String(value ?? ''),
             regex_placement.AI_OUTPUT,
         ));
+    if (!greetings[0] && greetings.length > 1) {
+        greetings.shift();
+    }
+    return greetings;
+}
+
+function currentCardGreetingContext() {
+    const character = characters[this_chid];
+    return {
+        name: String(character?.name ?? ''),
+        greetings: currentCardGreetings(),
+        expandMacros: value =>
+            substituteParams(value),
+    };
+}
+
+function snapshotCurrentHostHistory(chat) {
+    return snapshotHostHistory(chat, {
+        currentCard:
+            currentCardGreetingContext(),
+    });
 }
 
 async function persistRecoveredHistoryCheckpoint(
@@ -1860,171 +1947,66 @@ async function recoverProxyHistoryCheckpoint(
 async function detectUnobservedHistoryInvalidation(
     expectedChatId = null,
 ) {
+    // Every caller holds historyInvalidationCoordinator. In particular,
+    // this keeps the authoritative server inspection and an ungoverned
+    // baseline refresh atomic with the first governed checkpoint commit.
     const context =
         historyLifecycleContext(expectedChatId);
     if (!context.chatId) return null;
-    const currentSnapshot = snapshotHostHistory(context.chat);
-    const cutoffs = [];
-    let referenceHistoryLength = currentSnapshot.length;
-    let structuralDeletion = false;
-    let checkpoint =
-        await currentGovernedHistoryCheckpoint(
-            context.chatId,
-        );
-    let serverHistory = checkpoint === null
-        ? await inspectProxyGovernedHistory(
-            context.chatId,
-        )
-        : null;
-    if (
-        checkpoint === null
-        && serverHistory.recovery_anchor
-    ) {
-        checkpoint =
-            await recoverProxyHistoryCheckpoint(
-                context,
-                serverHistory,
-            );
-    }
-    if (checkpoint) {
-        let checkpointCutoff =
-            await findGovernedHistoryInvalidationCutoff({
-                checkpoint,
-                chatId: context.chatId,
-                currentHostHistorySnapshot:
-                    currentSnapshot,
-            });
-        historyLifecycleContext(context.chatId);
-        if (checkpointCutoff !== null) {
-            serverHistory ??=
-                await inspectProxyGovernedHistory(
-                    context.chatId,
-                );
-            if (serverHistory.recovery_anchor) {
-                try {
-                    checkpoint =
-                        await recoverProxyHistoryCheckpoint(
-                            context,
-                            serverHistory,
-                        );
-                    checkpointCutoff =
-                        await findGovernedHistoryInvalidationCutoff({
-                            checkpoint,
-                            chatId:
-                                context.chatId,
-                            currentHostHistorySnapshot:
-                                currentSnapshot,
-                        });
-                    historyLifecycleContext(
-                        context.chatId,
-                    );
-                } catch (error) {
-                    const reasonCode = String(
-                        error?.reasonCode ?? '',
-                    );
-                    if (
-                        reasonCode
-                            !== 'history_checkpoint_invalid'
-                        && !reasonCode.startsWith(
-                            'history_recovery_',
-                        )
-                    ) {
-                        throw error;
-                    }
-                }
-            }
-        }
-        if (checkpointCutoff !== null) {
-            cutoffs.push(checkpointCutoff);
-        }
-        const suffix = classifyGovernedHistorySuffix({
-            governedMessageCount:
-                checkpoint.message_count,
+    const observed =
+        await observeUnobservedHistoryInvalidation({
+            chatId: context.chatId,
             currentChat: context.chat,
+            baselineChatId:
+                state.chatSnapshotChatId,
+            baselineSnapshot:
+                state.chatSnapshot,
+            hasBranchEpochMarker: Object.hasOwn(
+                context.chatMetadata?.mnemosyne ?? {},
+                'branch_epoch',
+            ),
+            currentCard:
+                currentCardGreetingContext(),
+        }, {
+            readCheckpoint: chatId =>
+                currentGovernedHistoryCheckpoint(
+                    chatId,
+                ),
+            inspectServerHistory: chatId =>
+                inspectProxyGovernedHistory(
+                    chatId,
+                ),
+            recoverCheckpoint: serverHistory =>
+                recoverProxyHistoryCheckpoint(
+                    context,
+                    serverHistory,
+                ),
+            ensurePendingInvalidation: input =>
+                ensurePendingHistoryInvalidation(
+                    input,
+                ),
         });
-        if (suffix.status === 'structural_deletion') {
-            structuralDeletion = true;
-        }
-        if (
-            suffix.status
-            === 'ungoverned_assistant_append'
-        ) {
-            cutoffs.push(suffix.cutoff_turn_index);
-            structuralDeletion = true;
-        }
-        referenceHistoryLength = Math.max(
-            referenceHistoryLength,
-            checkpoint.message_count,
-        );
+    historyLifecycleContext(context.chatId);
+    if (
+        Number.isInteger(
+            observed.checkpointBranchEpoch,
+        )
+    ) {
         context.chatMetadata ??= {};
         context.chatMetadata.mnemosyne ??= {};
         context.chatMetadata.mnemosyne.branch_epoch =
-            checkpoint.branch_epoch;
-    } else if (requiresFreshChatForUncheckpointedHistory({
-        currentMessageCount: currentSnapshot.length,
-        hasCheckpoint: false,
-        hasBranchEpochMarker: Object.hasOwn(
-            context.chatMetadata?.mnemosyne ?? {},
-            'branch_epoch',
-        ),
-        serverHasGovernedHistory:
-            serverHistory.has_governed_history,
-    })) {
-        const error = new Error(
-            'This chat contains governed history but has no durable history checkpoint, so it cannot be resumed safely. Start a fresh chat with the same character card; automatic legacy migration is not available yet.',
-        );
-        error.reasonCode =
-            'legacy_governed_chat_requires_new_chat';
-        throw error;
+            observed.checkpointBranchEpoch;
     }
     if (
-        state.chatSnapshotChatId === context.chatId
-        && Array.isArray(state.chatSnapshot)
+        observed.guard
+        || observed.refreshBaseline
     ) {
-        const memoryCutoff =
-            findHostHistoryInvalidationCutoff(
-                state.chatSnapshot,
-                currentSnapshot,
-            );
-        if (memoryCutoff !== null) {
-            cutoffs.push(memoryCutoff);
-        }
-        if (
-            currentSnapshot.length
-            < state.chatSnapshot.length
-        ) {
-            structuralDeletion = true;
-        }
-        referenceHistoryLength = Math.max(
-            referenceHistoryLength,
-            state.chatSnapshot.length,
-        );
+        state.chatSnapshot =
+            observed.currentSnapshot;
+        state.chatSnapshotChatId =
+            context.chatId;
     }
-    if (cutoffs.length === 0) return null;
-
-    const cutoffTurnIndex = Math.min(...cutoffs);
-    const guard = await ensurePendingHistoryInvalidation({
-        cutoffTurnIndex,
-        hostReleaseLength:
-            structuralDeletion
-                ? cutoffTurnIndex
-                : hostReleaseLengthForInvalidation(
-                    cutoffTurnIndex,
-                    currentSnapshot,
-                ),
-        hostHistoryLength: Math.max(
-            referenceHistoryLength,
-            cutoffTurnIndex + 1,
-        ),
-        reasonCode: structuralDeletion
-            || cutoffTurnIndex >= currentSnapshot.length
-            ? 'host_message_deleted'
-            : 'host_message_edited',
-        expectedChatId: context.chatId,
-    });
-    state.chatSnapshot = currentSnapshot;
-    state.chatSnapshotChatId = context.chatId;
-    return guard;
+    return observed.guard;
 }
 
 async function resolvePendingHistoryEditBeforeGeneration(
@@ -2032,10 +2014,42 @@ async function resolvePendingHistoryEditBeforeGeneration(
 ) {
     const context =
         historyLifecycleContext(expectedChatId);
+    let pendingEdit =
+        await currentPendingHistoryEdit(
+            context.chatId,
+        );
+    if (
+        pendingEdit
+        && historyLifecycleIsActive()
+        && await repairPathologicalGreetingInvalidation({
+            chatId: context.chatId,
+            currentChat: context.chat,
+            currentCard:
+                currentCardGreetingContext(),
+            pendingGuard: pendingEdit,
+        }, {
+            inspectServerHistory: chatId =>
+                inspectProxyGovernedHistory(
+                    chatId,
+                ),
+            settleInvalidation: (
+                governedPrefix,
+                branchEpoch,
+                chatId,
+            ) => settlePendingHistoryInvalidation(
+                governedPrefix,
+                branchEpoch,
+                chatId,
+            ),
+        })
+    ) {
+        refreshChatSnapshot();
+        return null;
+    }
     await detectUnobservedHistoryInvalidation(
         context.chatId,
     );
-    let pendingEdit =
+    pendingEdit =
         await currentPendingHistoryEdit(
             context.chatId,
         );
@@ -2084,7 +2098,7 @@ async function resolvePendingHistoryEditBeforeGeneration(
         }
         if (resolution.action === 'clear') {
             const governedPrefix =
-                snapshotHostHistory(
+                snapshotCurrentHostHistory(
                     getContext().chat,
                 ).slice(
                     0,
@@ -2364,6 +2378,10 @@ function inspectHostSourceRoutes() {
 }
 
 function hostAssemblyMeasurementError(reasonCode, message) {
+    censusMark('HOST_ASSEMBLY_PROVENANCE', 'raised', {
+        reasonCode,
+        runId: state.runId ?? null,
+    });
     const error = new Error(message);
     error.reasonCode = reasonCode;
     return error;
@@ -2469,6 +2487,10 @@ async function measureAndInstallHostAssemblyOverlay({
     includeWorldInfo =
         activeRunMarker?.skip_wian !== true,
 }) {
+    censusMark('HOST_ASSEMBLY_PROVENANCE', 'enter', {
+        runId: state.runId ?? null,
+        stage: phase,
+    });
     if (phase !== 'base' && phase !== 'final') {
         throw hostAssemblyMeasurementError(
             'host_prompt_budget_invalid',
@@ -2662,6 +2684,10 @@ async function measureAndInstallHostAssemblyOverlay({
     }
     budgetLease.plan = plan;
     budgetLease.phase = phase;
+    censusMark('HOST_ASSEMBLY_PROVENANCE', 'passed', {
+        runId: state.runId ?? null,
+        stage: phase,
+    });
     return {
         status: 'installed',
         phase,
@@ -2911,7 +2937,13 @@ async function onWorldInfoScanDone(eventData) {
                 phase: 'final',
                 includeWorldInfo,
             });
-        if (measurement.status === 'stale') return;
+        if (measurement.status === 'stale') {
+            censusMark('HOST_ASSEMBLY_PROVENANCE', 'blocked', {
+                reasonCode: 'host_assembly_frame_stale',
+                runId: state.runId ?? null,
+            });
+            return;
+        }
     } catch (error) {
         blockOwnedHostAssemblyFrame(
             budgetLease,
@@ -2934,6 +2966,7 @@ async function onGenerationStarted(
     generationOptions = {},
     dryRun,
 ) {
+    censusMark('GENERATION_ENTRY_ADMISSION', 'enter', { runId: state.runId ?? null });
     const nextGenerationType = generationType ?? 'normal';
     if (dryRun === true && state.activeRunMarker) {
         beginForeignDryFrame(state.activeRunMarker);
@@ -2956,6 +2989,10 @@ async function onGenerationStarted(
         }
         return;
     }
+    // Past this point a genuine (non-dry) send is in flight: every Blocked:
+    // this pass can still hit (exclusive-operation, history-edit, intake, …)
+    // is now send-relevant and should reach the float.
+    if (dryRun === false) sendWindowOpen = true;
     if (
         state.exclusiveOperation !== null
         && !ownDryCheck
@@ -2975,29 +3012,39 @@ async function onGenerationStarted(
         return;
     }
 
-    let pendingHistoryEditReason;
     const historyChatId = getContext().chatId ?? null;
-    try {
-        const observedReason =
-            await historyInvalidationCoordinator.run(
-                () => resolvePendingHistoryEditBeforeGeneration(
+    // Covers the full synchronous hold window (P2 #2 fix): history-edit
+    // reconciliation below runs before the intake gate further down, and
+    // both are inside the same GENERATION_AFTER_COMMANDS wait the host
+    // awaits before releasing the textarea. Moved here (was only in front
+    // of the intake gate) so a slow history check is no longer a
+    // zero-feedback window. Only a real send opens it, matching
+    // sendWindowOpen's own dryRun===false gating.
+    if (dryRun === false) {
+        runStatusFloatController.onSendHeld({
+            chatId: historyChatId,
+            likelyPending: intakeLikelyPendingForChat(historyChatId),
+        });
+    }
+    const admission =
+        await runGenerationAdmissionGates({
+            isEnabled: () =>
+                settings().enabled,
+            dryRun: dryRun === true,
+            resolveHistoryInvalidation: () =>
+                historyInvalidationCoordinator.run(
+                    () => resolvePendingHistoryEditBeforeGeneration(
+                        historyChatId,
+                    ),
+                    { chatId: historyChatId },
+                ),
+            ensureStaticLoreReady: () =>
+                ensureStaticLoreReadyForGeneration(
                     historyChatId,
                 ),
-                { chatId: historyChatId },
-            );
-        pendingHistoryEditReason = settings().enabled
-            ? observedReason
-            : null;
-    } catch (error) {
-        pendingHistoryEditReason = settings().enabled
-            ? (
-                error.reasonCode
-                ?? 'history_edit_reconciliation_failed'
-            )
-            : null;
-    }
+        });
 
-    if (!settings().enabled) {
+    if (admission.status === 'disabled') {
         state.generationType = nextGenerationType;
         state.runId = null;
         clearInjections();
@@ -3005,35 +3052,36 @@ async function onGenerationStarted(
         return;
     }
 
-    if (pendingHistoryEditReason) {
+    if (admission.status === 'blocked') {
         state.generationType = nextGenerationType;
         if (dryRun !== true) {
-            blockCurrentGeneration(pendingHistoryEditReason);
+            blockCurrentGeneration(
+                admission.reasonCode,
+            );
         } else {
             clearInjections();
             state.runId = null;
-            state.blockReason = pendingHistoryEditReason;
-            updateStatus(`Blocked: ${pendingHistoryEditReason}`);
+            state.blockReason =
+                admission.reasonCode;
+            updateStatus(
+                `Blocked: ${admission.reasonCode}`,
+            );
         }
         return;
     }
-
-    if (dryRun === false) {
-        const intakeReason =
-            await ensureStaticLoreReadyForGeneration(
-                historyChatId,
-            );
-        if (intakeReason) {
-            state.generationType = nextGenerationType;
-            blockCurrentGeneration(intakeReason);
-            return;
-        }
-    }
+    // The host awaits this whole listener before clearing the
+    // textarea/appending the user bubble (GENERATION_AFTER_COMMANDS).
+    // The admission module preserves the real history-then-intake order;
+    // onSendHeld above is deliberately not repeated when intake begins.
     state.generationAbortReason = null;
+    // Edge-case fallback only: the ordinary release is the real
+    // onGenerationStarted below resetting the float's state wholesale.
+    runStatusFloatController.onSendReleased();
 
     claimSettingsReadyFinalizerOrder();
     const context = getContext();
-    const startHostHistorySnapshot = snapshotHostHistory(context.chat);
+    const startHostHistorySnapshot =
+        snapshotCurrentHostHistory(context.chat);
     const pendingUserTurn = shouldReservePendingUserTurn({
         generationType: nextGenerationType,
         automaticTrigger: generationOptions?.automatic_trigger,
@@ -3157,6 +3205,12 @@ async function onGenerationStarted(
     const profile = inspectCurrentHostProfile();
     if (profile.status !== 'ready') {
         clearInjections();
+        // Matches the sibling loadProxyHealth/host-budget catches above:
+        // state.runId was assigned a real run further up, and this block is
+        // terminal for it. Leaving it set fools the second
+        // GENERATION_AFTER_COMMANDS listener's !state.runId guard into
+        // polling for a run that will never exist (P1-1).
+        state.runId = null;
         state.blockReason = profile.reason_code;
         updateStatus(`Blocked: ${profile.reason_code}`);
         return;
@@ -3182,7 +3236,7 @@ async function onGenerationStarted(
                         expectedChatId: context.chatId,
                     });
                 await persistGovernedHistoryCheckpoint(
-                    snapshotHostHistory(
+                    snapshotCurrentHostHistory(
                         context.chat,
                     ).slice(0, remainingLength),
                     {
@@ -3215,16 +3269,28 @@ async function onGenerationStarted(
                 worldInfoEntries: [],
                 phase: 'base',
             });
-        if (baseline.status === 'stale') return;
+        if (baseline.status === 'stale') {
+            censusMark('GENERATION_ENTRY_ADMISSION', 'blocked', {
+                reasonCode: 'host_assembly_frame_stale',
+                runId: state.runId ?? null,
+            });
+            return;
+        }
         if (typeof eventSource.makeLast === 'function') {
             eventSource.makeLast(
                 event_types.WORLDINFO_SCAN_DONE,
                 onWorldInfoScanDone,
             );
         }
+        censusMark('GENERATION_ENTRY_ADMISSION', 'passed', { runId: state.runId ?? null });
         updateStatus('Ready');
     } catch (error) {
         clearInjections();
+        // Same P1-1 fix as the profile check above: this is the last
+        // fallible step before the run is considered started, so a failure
+        // here must also clear state.runId or the float starts polling a
+        // run that was never created.
+        state.runId = null;
         state.blockReason = error.reasonCode ?? 'context_unavailable';
         updateStatus(`Blocked: ${state.blockReason}`);
     }
@@ -3317,7 +3383,8 @@ async function onMessageSwiped(messageId) {
                 },
             );
             historyLifecycleContext(context.chatId);
-            const snapshot = snapshotHostHistory(context.chat);
+            const snapshot =
+                snapshotCurrentHostHistory(context.chat);
             await persistGovernedHistoryCheckpoint(
                 snapshot,
                 { expectedChatId: context.chatId },
@@ -3380,7 +3447,8 @@ async function onMessageSwipeDeleted(eventData) {
                 },
             );
             historyLifecycleContext(context.chatId);
-            const snapshot = snapshotHostHistory(context.chat);
+            const snapshot =
+                snapshotCurrentHostHistory(context.chat);
             await persistGovernedHistoryCheckpoint(
                 snapshot,
                 { expectedChatId: context.chatId },
@@ -3402,7 +3470,7 @@ async function onMessageDeleted(remainingLength) {
         const context =
             historyLifecycleContext(expectedChatId);
         const currentSnapshot =
-            snapshotHostHistory(context.chat);
+            snapshotCurrentHostHistory(context.chat);
         const normalizedRemainingLength =
             Number(remainingLength);
         try {
@@ -3442,6 +3510,8 @@ async function onMessageDeleted(remainingLength) {
                     {
                         expectedRemainingLength:
                             normalizedRemainingLength,
+                        currentCard:
+                            currentCardGreetingContext(),
                     },
                 );
             if (
@@ -3492,7 +3562,7 @@ async function onHostMessageEdited(messageId) {
         const context =
             historyLifecycleContext(expectedChatId);
         const currentSnapshot =
-            snapshotHostHistory(context.chat);
+            snapshotCurrentHostHistory(context.chat);
         const normalizedMessageId = Number(messageId);
         try {
             if (!historyLifecycleCanObserve()) return;
@@ -3524,6 +3594,8 @@ async function onHostMessageEdited(messageId) {
                     {
                         expectedMessageIndex:
                             normalizedMessageId,
+                        currentCard:
+                            currentCardGreetingContext(),
                     },
                 );
             }
@@ -3578,6 +3650,8 @@ async function onChatChanged() {
         clearLastFeedback: true,
     });
     runActivityController.clearForChatChange();
+    runStatusFloatController.clearForChatChange();
+    sendWindowOpen = false;
     return historyInvalidationCoordinator.run(async () => {
         state.runId = null;
         state.runScope = null;
@@ -3622,6 +3696,7 @@ function onGenerationFinished() {
     state.generationType = null;
     state.generationAbortReason = null;
     state.suppressedMessageDeletion = null;
+    sendWindowOpen = false;
     clearInjections();
     refreshChatSnapshot();
     updateStatus(generationTerminalStatus({
@@ -3718,6 +3793,7 @@ async function onHostMessageReceived() {
 }
 
 async function onPromptReady(eventData) {
+    censusMark('PROMPT_TRACE_SOURCE_ISOLATION', 'enter', { runId: state.runId ?? null });
     const activeRunMarker = state.activeRunMarker;
     if (
         !settings().enabled
@@ -3845,7 +3921,7 @@ async function onPromptReady(eventData) {
             contextResponse: state.contextResponse,
         });
         const currentHostHistorySnapshot =
-            snapshotHostHistory(context.chat);
+            snapshotCurrentHostHistory(context.chat);
         const hostHistoryBinding = await createStoryPromptHistoryBinding({
             chatId: runLease.chatId,
             runScope: state.runScope,
@@ -3959,7 +4035,9 @@ async function onPromptReady(eventData) {
                         state.providerBudgetPolicy,
                     chatId: context.chatId,
                     hostHistorySnapshot:
-                        snapshotHostHistory(context.chat),
+                        snapshotCurrentHostHistory(
+                            context.chat,
+                        ),
                 });
             assertCurrentStoryRunLease(runLease);
             await assertForwardingProbeLease(
@@ -3973,7 +4051,9 @@ async function onPromptReady(eventData) {
                         state.providerBudgetPolicy,
                     chatId: context.chatId,
                     hostHistorySnapshot:
-                        snapshotHostHistory(context.chat),
+                        snapshotCurrentHostHistory(
+                            context.chat,
+                        ),
                     activeRunMarker:
                         state.activeRunMarker,
                     runId: state.runId,
@@ -3988,16 +4068,24 @@ async function onPromptReady(eventData) {
             updateStatus('Dry check passed');
         }
         if (!eventData.dryRun) {
-            if (state.sourceIsolationLease !== null) {
+            if (
+                state.sourceIsolationLease !== null
+                || state.sourceTransformFenceLease !== null
+            ) {
                 const error = new Error(
-                    'A prior author-source isolation lease is still active.',
+                    'A prior prompt transform lease is still active.',
                 );
                 error.reasonCode =
                     'host_source_isolation_lease_overlap';
                 throw error;
             }
-            const isolated = createAbsorbedSourceIsolationLease({
+            const fenced = await createHostTransformFenceLease({
                 workingMessages: eventData.chat,
+                internalMessages,
+                promptTrace: finalized.trace,
+            });
+            const isolated = createAbsorbedSourceIsolationLease({
+                workingMessages: fenced.messages,
                 internalMessages,
                 promptTrace: finalized.trace,
             });
@@ -4018,7 +4106,9 @@ async function onPromptReady(eventData) {
                 ...isolated.messages,
             );
             state.sourceIsolationLease = isolated.lease;
+            state.sourceTransformFenceLease = fenced.lease;
         }
+        censusMark('PROMPT_TRACE_SOURCE_ISOLATION', 'passed', { runId: state.runId ?? null });
     } catch (error) {
         if (runLease) {
             try {
@@ -4037,6 +4127,7 @@ async function onPromptReady(eventData) {
         state.providerMessages = null;
         state.forwardingProbeLease = null;
         state.sourceIsolationLease = null;
+        state.sourceTransformFenceLease = null;
         if (state.activeRunMarker) {
             state.activeRunMarker.prompt_host_history_binding = null;
         }
@@ -4060,6 +4151,7 @@ async function onPromptReady(eventData) {
 }
 
 async function onSettingsReady(generateData) {
+    censusMark('SETTINGS_FINALIZER_ADMISSION', 'enter', { runId: state.runId ?? null });
     const activeRunMarker = state.activeRunMarker;
     if (
         !settings().enabled
@@ -4069,8 +4161,14 @@ async function onSettingsReady(generateData) {
             activeRunMarker.run_id,
         )
     ) {
+        const pendingBlockStamp = state.pendingBlockStamp;
+        state.pendingBlockStamp = null;
+        if (settings().enabled && pendingBlockStamp) {
+            blockChatCompletionRequest(generateData, pendingBlockStamp);
+        }
         return;
     }
+    state.pendingBlockStamp = null;
     if (!settingsReadyFinalizerIsLast()) {
         blockChatCompletionRequest(
             generateData,
@@ -4083,10 +4181,19 @@ async function onSettingsReady(generateData) {
         blockChatCompletionRequest(generateData, profile.reason_code);
         return;
     }
-    Object.assign(
-        generateData,
-        upstreamConnectionLease.bindHostRequest(generateData),
-    );
+    try {
+        Object.assign(
+            generateData,
+            upstreamConnectionLease.bindHostRequest(generateData),
+        );
+    } catch (error) {
+        blockChatCompletionRequest(
+            generateData,
+            error?.reasonCode
+                ?? 'upstream_connection_profile_lease_invalid',
+        );
+        return;
+    }
     if (!state.promptTraceInputs || !Array.isArray(generateData?.messages)) {
         blockChatCompletionRequest(
             generateData,
@@ -4119,7 +4226,8 @@ async function onSettingsReady(generateData) {
                 activeRunMarker.prompt_host_history_binding,
             chatId: context.chatId,
             runScope: state.runScope,
-            hostHistorySnapshot: snapshotHostHistory(context.chat),
+            hostHistorySnapshot:
+                snapshotCurrentHostHistory(context.chat),
         });
         if (
             state.sourceRemovalAuthorizations.length > 0
@@ -4144,10 +4252,30 @@ async function onSettingsReady(generateData) {
                 ...restored.messages,
             );
         }
+        let sourceTransformOverrides = [];
+        if (state.sourceTransformFenceLease) {
+            const restored =
+                await restoreHostTransformFenceLease({
+                    workingMessages: generateData.messages,
+                    lease: state.sourceTransformFenceLease,
+                });
+            generateData.messages.splice(
+                0,
+                generateData.messages.length,
+                ...restored.messages,
+            );
+            sourceTransformOverrides = restored.overrides;
+        }
+        const finalPromptTraceInputs = {
+            ...state.promptTraceInputs,
+            sourceTransformOverrides,
+        };
         const finalized = await finalizePromptTrace({
-            promptTraceInputs: state.promptTraceInputs,
+            promptTraceInputs: finalPromptTraceInputs,
             providerMessages: generateData.messages,
         });
+        state.promptTraceInputs =
+            structuredClone(finalPromptTraceInputs);
         state.promptTrace = finalized.trace;
         state.providerMessages = finalized.providerMessages;
         state.lastDryCheck = finalized.inspection;
@@ -4156,10 +4284,16 @@ async function onSettingsReady(generateData) {
             finalized.trace,
         );
         generateData.custom_include_body =
-            mergeTransportLeaseIntoCustomBody(
+            await mergeResolvedTransportLeaseIntoCustomBody(
                 generateData.custom_include_body,
-                state.transportLease,
+                {
+                    lease: state.transportLease,
+                    resolveLease: () => resolveControlLease({
+                        bindToRootRun: true,
+                    }),
+                },
             );
+        censusMark('SETTINGS_FINALIZER_ADMISSION', 'passed', { runId: state.runId ?? null });
     } catch (error) {
         state.blockReason =
             error.reasonCode
@@ -4167,6 +4301,7 @@ async function onSettingsReady(generateData) {
         blockChatCompletionRequest(generateData, state.blockReason);
     } finally {
         state.sourceIsolationLease = null;
+        state.sourceTransformFenceLease = null;
     }
 }
 
@@ -4241,7 +4376,9 @@ globalThis.TavernMnemosyneGenerationInterceptor = async (
                 generationType,
                 generationMessages: chat,
                 hostHistorySnapshot:
-                    snapshotHostHistory(context.chat),
+                    snapshotCurrentHostHistory(
+                        context.chat,
+                    ),
             });
         return;
     }
@@ -4279,7 +4416,9 @@ async function runForwardingCheck() {
                     state.providerBudgetPolicy,
                 chatId: context.chatId,
                 hostHistorySnapshot:
-                    snapshotHostHistory(context.chat),
+                    snapshotCurrentHostHistory(
+                        context.chat,
+                    ),
                 activeRunMarker: state.activeRunMarker,
                 runId: state.runId,
             };
@@ -4398,6 +4537,14 @@ async function autoRunStaticLoreIntake() {
                 ?? 'static_lore_reconcile_blocked';
             break;
         }
+        runStatusFloatController.onIntakeProgress({
+            batchIndex: prepared.batch_index ?? null,
+            batchCount: prepared.batch_count ?? null,
+            status: prepared.status === 'retry_required'
+                ? 'failed'
+                : 'running',
+            reasonCode: prepared.reason_code ?? null,
+        });
         const progress = JSON.stringify({
             status: prepared.status,
             snapshotId: prepared.snapshot_id ?? null,
@@ -4415,8 +4562,36 @@ async function autoRunStaticLoreIntake() {
             reasonCode = 'static_lore_initialization_stalled';
         }
     }
+    // The capsule hands over to the generation phases once initialization
+    // stops; a failure keeps its red state until the user dismisses it.
+    if (outcome !== 'retryable') {
+        runStatusFloatController.onIntakeProgress({ status: 'ended' });
+    }
     syncIntakeApprovalUi();
     return { status: outcome, reasonCode };
+}
+
+// Second-round Codex fix (P1-3 residual): the float's held-reveal is
+// signal-gated (run-status-float.js's heldSignalSeen), but a real intake's
+// first signal previously arrived only after loadProxyHealth + source
+// collection + the prepareIntake network round-trip — a genuinely
+// pending chat still showed nothing during that stretch. This is the one
+// piece of local, synchronous, zero-round-trip knowledge available: a
+// leftover state.preparedIntake for this exact chat (see autoRunStaticLoreIntake
+// above and chat-save-initialization-gate.js) means the last send did not
+// finish all batches, so intake genuinely still has real pending work with
+// no need to ask the server again to know that. Absence of such a record
+// (never attempted this session, or cleared after a prior success) must
+// not guess "pending" — a chat that really is already ready must still
+// never flash held on nothing but this confirmation round-trip's latency.
+function intakeLikelyPendingForChat(chatId) {
+    const preparedIntake = state.preparedIntake;
+    return Boolean(
+        preparedIntake
+        && preparedIntake.chatId === chatId
+        && preparedIntake.prepared?.status
+        && preparedIntake.prepared.status !== 'ready',
+    );
 }
 
 async function ensureStaticLoreReadyForGeneration(chatId) {
@@ -4537,6 +4712,14 @@ async function runStaticLoreIntake() {
             }
             if (currentIntake.prepared.status === 'retry_required') {
                 state.preparedIntake = currentIntake;
+                runStatusFloatController.onIntakeProgress({
+                    batchIndex: currentIntake.prepared.batch_index ?? null,
+                    batchCount: currentIntake.prepared.batch_count ?? null,
+                    status: 'failed',
+                    reasonCode:
+                        currentIntake.prepared.reason_code
+                        ?? 'static_lore_intake_batch_failed',
+                });
                 updateStatus(
                     `设定导入批次 ${currentIntake.prepared.batch_index}/`
                     + `${currentIntake.prepared.batch_count} 失败，将重试`,
@@ -4792,22 +4975,15 @@ async function runStaticLoreIntake() {
         const modelRequest = stablePrepared.model_request;
         const hostRequest =
             upstreamConnectionLease.bindHostRequest({
-                chat_completion_source: 'custom',
-                custom_url:
-                    `${safeProxyBaseUrl()}/v1/mnemosyne/intake`,
-                custom_include_body: JSON.stringify({
-                    mnemosyne_intake_request_id:
-                        stablePrepared.request_id,
-                    mnemosyne_intake_execution_lease:
+                ...bindPreparedIntakeHostRequest({
+                    modelRequest,
+                    requestId: stablePrepared.request_id,
+                    executionLease:
                         stablePrepared.intake_execution_lease,
-                }),
-                custom_exclude_body: '',
-                custom_include_headers: JSON.stringify({
-                    'x-mnemosyne-intake-capability':
+                    intakeCapability:
                         stablePrepared.intake_capability,
+                    proxyBaseUrl: safeProxyBaseUrl(),
                 }),
-                custom_prompt_post_processing: '',
-                ...modelRequest,
             });
         const completionResponse = await fetch(
             '/api/backends/chat-completions/generate',
@@ -4895,10 +5071,12 @@ async function requireSuccessfulText(response, description) {
 async function resolveCurrentProvisioningUpstreamUrl(
     presetCustomUrl,
     rootHandle,
+    currentModel,
 ) {
     try {
         return upstreamConnectionLease.resolveForProvisioning({
             currentUrl: presetCustomUrl,
+            currentModel,
             runtimeUrl: configuredRuntimeProxyUrl(),
         });
     } catch (error) {
@@ -4913,7 +5091,9 @@ async function resolveCurrentProvisioningUpstreamUrl(
             await readInstalledBrowserFolderRuntimeConfig(rootHandle);
         return upstreamConnectionLease.resolveForProvisioning({
             currentUrl: presetCustomUrl,
+            currentModel,
             installedRuntimeUrl: installed?.upstreamBaseUrl,
+            installedRuntimeModel: installed?.upstreamModel,
             runtimeUrl: configuredRuntimeProxyUrl(),
         });
     }
@@ -4944,13 +5124,9 @@ async function browserFolderProvisioningInput({
                 credentials: 'same-origin',
                 cache: 'no-store',
             }),
-            fetch(new URL(
-                '../../distribution/browser-folder-bootstrap/index.mjs',
-                import.meta.url,
-            ), {
-                credentials: 'same-origin',
-                cache: 'no-store',
-            }),
+            fetchDistributionArtifact(
+                'browser-folder-bootstrap/index.mjs',
+            ),
         ]);
     if (!versionResponse.ok || !manifestResponse.ok) {
         const error = new Error(
@@ -4976,6 +5152,7 @@ async function browserFolderProvisioningInput({
                 await resolveCurrentProvisioningUpstreamUrl(
                     preset.custom_url,
                     rootHandle,
+                    currentHostBinding().model,
                 ),
             upstreamModel: currentHostBinding().model,
             providerContextTokens:
@@ -4985,6 +5162,21 @@ async function browserFolderProvisioningInput({
         }),
         bootstrapSource,
     });
+}
+
+// The version in manifest.json has shipped unchanged across several
+// deployments, so it cannot tell a stale install from a current one. The
+// runtime bundle's build id is a content fingerprint of what this copy of the
+// extension would install, which is what the orchestrator compares against
+// the runtime that is actually running.
+async function shippedRuntimeBuildId() {
+    const response = await fetchDistributionArtifact(
+        'runtime-bundle/manifest.json',
+    );
+    const manifest = await response.json();
+    return typeof manifest?.runtime_build_id === 'string'
+        ? manifest.runtime_build_id
+        : null;
 }
 
 function currentProvisioningOrchestrator() {
@@ -5002,6 +5194,17 @@ function currentProvisioningOrchestrator() {
             browserFolderHandleStore.clear(),
         controlClient: currentControlClient(),
         loadBrowserFolderInput: browserFolderProvisioningInput,
+        loadExpectedRuntimeBuildId: shippedRuntimeBuildId,
+        validateReadyLease: lease =>
+            upstreamConnectionLease.assertRuntimeBinding({
+                expectedProviderContextTokens:
+                    Number(oai_settings.openai_max_context),
+                expectedProviderOutputReserveTokens:
+                    Number(oai_settings.openai_max_tokens),
+                runtimeCapabilities:
+                    currentControlClient().capabilitiesForLease(lease),
+                runtimeLease: lease,
+            }),
     });
 }
 
@@ -5095,8 +5298,22 @@ async function resumeProvisioningVerification({
                 if (enabled) enabled.checked = false;
                 saveSettingsDebounced();
             }
-            statusElement.textContent =
-                '尚未部署；打开运行开关会自动完成部署。';
+            if ([
+                'upstream_connection_profile_lease_missing',
+                'upstream_connection_profile_lease_invalid',
+            ].includes(inspected.prior_error)) {
+                statusElement.textContent =
+                    '运行组件已部署，但上游连接绑定尚未通过校验；请重新打开运行开关完成恢复。';
+            } else if (
+                inspected.prior_error
+                === 'upstream_connection_profile_lease_ambiguous'
+            ) {
+                statusElement.textContent =
+                    '运行组件已部署，但多个连接匹配同一上游；请明确选择连接后重新打开运行开关。';
+            } else {
+                statusElement.textContent =
+                    '尚未部署；打开运行开关会自动完成部署。';
+            }
             statusElement.dataset.kind = 'idle';
             updateStatus('Disabled');
             return;
@@ -5132,6 +5349,12 @@ const PROVISIONING_ERROR_MESSAGES = Object.freeze({
         '未找到真实的上游服务地址。请在 API 连接页填入你的 Custom OpenAI 端点后重试。',
     browser_folder_upstream_model_missing:
         '请先在 API 连接页选择模型。',
+    upstream_connection_profile_lease_missing:
+        '当前连接与已部署的上游绑定不一致。请选择要使用的连接后重新打开运行开关。',
+    upstream_connection_profile_lease_ambiguous:
+        '多个连接具有相同的上游地址和模型。请明确选择一个连接后重新打开运行开关。',
+    upstream_connection_profile_lease_invalid:
+        '已保存的上游连接绑定已失效。请重新选择连接并打开运行开关。',
     browser_folder_provider_budget_invalid:
         '请检查上下文长度与回复长度设置后重试。',
     browser_folder_permission_not_granted:
@@ -5441,9 +5664,47 @@ function addSettingsUi() {
     syncRunActivityUi();
 }
 
+function onRunStatusFloatGenerationStarted(
+    generationType,
+    generationOptions,
+    dryRun,
+) {
+    if (dryRun) return;
+    // Mirror the same-effect gates as the real onGenerationStarted: a
+    // disabled extension or an exclusive operation in progress (e.g.
+    // dry-check, static-lore intake) means no owned run will actually
+    // execute, so the float should not start polling for one.
+    if (!settings().enabled) return;
+    if (state.exclusiveOperation !== null) return;
+    // The real onGenerationStarted (registered first on the same event and
+    // awaited before this listener runs) clears state.runId on every block
+    // path and only assigns it once a run is actually going to execute.
+    // Without this guard a blocked send still started polling activity/live
+    // for a run that would never exist, degrading into a false "生成中"
+    // once the idle-poll threshold tripped (see design doc, blind spot B).
+    if (!state.runId) return;
+    runStatusFloatController.onGenerationStarted({
+        chatId: getContext().chatId ?? null,
+    });
+}
+function onRunStatusFloatGenerationEnded() {
+    runStatusFloatController.onGenerationEnded({
+        chatId: getContext().chatId ?? null,
+    });
+}
+function onRunStatusFloatGenerationStopped() {
+    runStatusFloatController.onGenerationStopped({
+        chatId: getContext().chatId ?? null,
+    });
+}
+
 eventSource.on(
     event_types.GENERATION_AFTER_COMMANDS,
     onGenerationStarted,
+);
+eventSource.on(
+    event_types.GENERATION_AFTER_COMMANDS,
+    onRunStatusFloatGenerationStarted,
 );
 eventSource.on(event_types.WORLDINFO_SCAN_DONE, onWorldInfoScanDone);
 eventSource.on(event_types.CHAT_COMPLETION_PROMPT_READY, onPromptReady);
@@ -5462,7 +5723,12 @@ eventSource.on(event_types.MESSAGE_SWIPED, onMessageSwiped);
 eventSource.on(event_types.MESSAGE_SWIPE_DELETED, onMessageSwipeDeleted);
 eventSource.on(event_types.MESSAGE_DELETED, onMessageDeleted);
 eventSource.on(event_types.GENERATION_ENDED, onGenerationEnded);
+eventSource.on(event_types.GENERATION_ENDED, onRunStatusFloatGenerationEnded);
 eventSource.on(event_types.GENERATION_STOPPED, onGenerationFinished);
+eventSource.on(
+    event_types.GENERATION_STOPPED,
+    onRunStatusFloatGenerationStopped,
+);
 eventSource.on(event_types.CHAT_CHANGED, onChatChanged);
 eventSource.on(event_types.CHAT_LOADED, onChatChanged);
 eventSource.on(event_types.MESSAGE_SENT, onHostMessageSent);

@@ -2,6 +2,7 @@ import {
   canonicalJson,
   sha256,
 } from '../contracts/hash.js';
+import { censusMark } from '../inspection/gate-census.js';
 
 export class RuntimeWorldIntegrityError extends Error {
   constructor(reasonCode, message, details = null) {
@@ -29,6 +30,7 @@ export function assertRuntimeWorldProjectionIntegrity({
   activeSnapshot,
   readyProjectionHashes,
 }) {
+  censusMark('WORLD_HASH_INTEGRITY', 'enter', { runId: null });
   if (
     runtimeWorld?.schema !== 'mnemosyne.runtime-world.v1'
     || runtimeWorld.status !== 'ready'
@@ -76,6 +78,7 @@ export function assertRuntimeWorldProjectionIntegrity({
       },
     );
   }
+  censusMark('WORLD_HASH_INTEGRITY', 'passed', { runId: null });
   return Object.freeze({
     runtime_world_hash: runtimeWorldHash,
   });

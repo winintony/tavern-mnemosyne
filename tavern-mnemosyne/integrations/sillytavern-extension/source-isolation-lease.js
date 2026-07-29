@@ -1,8 +1,11 @@
+import { censusMark } from './gate-census.js';
+
 const AUTHOR_SOURCE_POLICY = 'remove_absorbed_author_source';
 const PLACEHOLDER_PREFIX = '\uE000MNEMOSYNE-SOURCE-LEASE:';
 const PLACEHOLDER_SUFFIX = ':\uE001';
 
 function isolationError(reasonCode, message) {
+  censusMark('PROMPT_TRACE_SOURCE_ISOLATION', 'raised', { reasonCode, runId: null });
   const error = new Error(message);
   error.reasonCode = reasonCode;
   return error;

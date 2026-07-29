@@ -3,6 +3,7 @@ import {
   controlOperationRegistry,
   operationRegistryCanonicalJson,
 } from './control-operation-registry-browser.js';
+import { censusMark } from './gate-census.js';
 
 const BRIDGE_CAPABILITIES_PATH =
   '/api/plugins/tavern-mnemosyne/v1/capabilities';
@@ -24,6 +25,7 @@ export const CONTROL_CLIENT_OPERATION_MAP = Object.freeze({
   requestSourceRemovalGrants: 'source-removal-grants',
   inspectUpstreamReadiness: 'upstream-readiness',
   inspectActivity: 'activity/inspect',
+  inspectLiveActivity: 'activity/live',
   inspectDormantThreads: 'activity/dormant-threads',
   prepareEvaluation: 'evaluation/prepare',
   submitEvaluationFeedback: 'evaluation/feedback',
@@ -36,6 +38,14 @@ export class MnemosyneControlError extends Error {
     this.name = 'MnemosyneControlError';
     this.reasonCode = reasonCode;
     this.details = details;
+    // Same family as the Node-side MRE constructor (P1-2), distinguished by
+    // `cls`; site resolution happens inside censusMark, never here, so the
+    // disabled state never touches `.stack` (P0-1).
+    censusMark('MRE', 'raised', {
+      reasonCode,
+      cls: 'MnemosyneControlError',
+      errorForSite: this,
+    });
   }
 }
 
@@ -147,6 +157,7 @@ function assertCapabilities(capabilities) {
 }
 
 function leaseFromCapabilities(capabilities, adapterId, now) {
+  censusMark('TRANSPORT_CAPABILITY_RESOLUTION', 'passed', { runId: null });
   return Object.freeze({
     adapter_id: adapterId,
     protocol_version: capabilities.negotiated_protocol,
@@ -272,6 +283,8 @@ async function loopbackCapabilities(health, loopbackBaseUrl) {
     storage_status: health.storage_status ?? 'unknown',
     upstream_status: health.upstream_status ?? 'unknown',
     upstream_reachable: health.upstream_reachable ?? 'unknown',
+    main_host_binding: health.main_host_binding ?? null,
+    provider_budget_policy: health.provider_budget_policy ?? null,
     generation_base_url: new URL('/v1', loopbackBaseUrl).href,
     operations: Object.values(controlOperationRegistry({
       includeEvaluation,
@@ -309,6 +322,7 @@ export function createMnemosyneControlClient({
   }
 
   async function resolveRootTransport({ signal } = {}) {
+    censusMark('TRANSPORT_CAPABILITY_RESOLUTION', 'enter', { runId: null });
     const auth = normalizeHostAuthContext(getHostAuthContext?.());
     let bridgeResponse;
     try {
@@ -397,6 +411,10 @@ export function createMnemosyneControlClient({
     lease,
     signal,
   } = {}) {
+    censusMark('CONTROL_OPERATION_DELIVERY', 'enter', {
+      runId: null,
+      stage: operationId,
+    });
     assertLease(lease);
     const operation = ALL_CONTROL_OPERATION_REGISTRY[operationId];
     if (!operation) {
@@ -494,6 +512,10 @@ export function createMnemosyneControlClient({
         },
       );
     }
+    censusMark('CONTROL_OPERATION_DELIVERY', 'passed', {
+      runId: null,
+      stage: operationId,
+    });
     return responseBody;
   }
 

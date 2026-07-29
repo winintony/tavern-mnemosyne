@@ -8,7 +8,11 @@ import {
 } from '../contracts/continuity-payload.js';
 import { MnemosyneRequestError } from '../contracts/errors.js';
 import { canonicalJson, sha256 } from '../contracts/hash.js';
+import { censusMark } from '../inspection/gate-census.js';
 import { validateOkfBundle } from '../okf/bundle.js';
+import {
+  createDynamicStoryProjector,
+} from '../history/dynamic-story-projector.js';
 import {
   resolveBranchSegments,
   selectActiveTurnMemoryRows,
@@ -230,6 +234,8 @@ async function loadDynamicWorld({
   branchId,
   branchEpoch,
   visibleTurnIndex,
+  projector,
+  allowRebase = true,
 }) {
   let serialized;
   try {
@@ -310,15 +316,51 @@ async function loadDynamicWorld({
     dynamicWorld.canonical_bundle_hash
       !== sha256(canonicalJson(canonicalBundle(bundle)))
   ) {
-    fail(
-      'dynamic_world_hash_mismatch',
-      'The Dynamic World projection does not match its OKF bundle hash.',
-    );
+    // A projection bootstrapped before the world layer existed carries the
+    // hash of an empty bundle. Intake fills that bundle in and nothing goes
+    // back to rebase the projection, which then blocks every generation. At
+    // turn zero there is no history to replay, so the initial projection is
+    // rebuilt from the current bundle and this run continues. A projection
+    // that has real turns behind it is a different problem and still fails.
+    censusMark('TURN_ZERO_PROJECTION_REBASE', 'enter', { runId: null });
+    if (dynamicWorld.through_turn_index !== 0 || !allowRebase) {
+      fail(
+        'dynamic_world_bundle_superseded',
+        'The Dynamic World projection was built against a superseded OKF bundle.',
+        {
+          through_turn_index: dynamicWorld.through_turn_index,
+        },
+      );
+    }
+    censusMark('TURN_ZERO_PROJECTION_REBASE', 'passed', { runId: null });
+    await projector.rebuild({
+      chatId,
+      branchId,
+      branchEpoch,
+      turnIndex: 0,
+    });
+    return loadDynamicWorld({
+      opened,
+      chatId,
+      branchId,
+      branchEpoch,
+      visibleTurnIndex,
+      projector,
+      allowRebase: false,
+    });
   }
   return {
     world: dynamicWorld,
     removedCoordinates: reconstructed.removedCoordinates,
     rows,
+    // A scene that ever existed left a concept document behind, and the
+    // bundle is the same artifact the publish gate validates. Its absence is
+    // therefore a durable, re-derivable "this chat has never had a scene",
+    // which a projection field could not give us: the greeting turn advances
+    // the projection without ever writing a scene.
+    sceneEverEstablished: (bundle.concepts ?? []).some(
+      concept => concept?.frontmatter?.type === 'scene_state',
+    ),
   };
 }
 
@@ -400,13 +442,59 @@ function mapRetrievalHandle(item) {
   };
 }
 
-function activeScene(runtimeWorld, chatId, dynamicScene = null) {
+// A chat adopted with history behind it has no scene yet, and static lore
+// rightly carries none: a character card describes a person, not a scene in
+// progress. Refusing to compose until a scene exists means the first turn can
+// never run, and the first turn is what would create one. Turn zero was too
+// narrow a window: processing the greeting advances the projection without
+// writing a scene, so the deadlock simply moved to turn one. While the chat
+// has never held a scene at all the server names a bootstrap one from the
+// cast the world already knows, and the first writeback replaces it. A scene
+// that once existed and is now missing is a real fault and still says so.
+const BOOTSTRAP_SCENE_LABEL = 'adopted-chat bootstrap';
+// The card's own character and the user persona are the whole cast a chat
+// starts with; naming more would spend payload budget on guesses.
+const BOOTSTRAP_SCENE_PARTICIPANT_LIMIT = 2;
+
+function bootstrapSceneParticipants(runtimeWorld) {
+  return (runtimeWorld.retrieval_handles ?? [])
+    .filter(handle => handle?.type === 'character')
+    .map(handle => String(handle.entity_ref || ''))
+    .filter(ref => ref)
+    .sort((left, right) => left.localeCompare(right))
+    .slice(0, BOOTSTRAP_SCENE_PARTICIPANT_LIMIT);
+}
+
+export function activeScene(
+  runtimeWorld,
+  chatId,
+  dynamicScene = null,
+  sceneEverEstablished = false,
+) {
   const scene = dynamicScene ?? runtimeWorld.active_scene;
+  const ref = `mnemosyne://chat/${encodeURIComponent(chatId)}/active-scene`;
   if (!scene) {
+    if (!sceneEverEstablished) {
+      // No reason_code: that field means "why this lane failed", and a
+      // bootstrap scene has not failed. Carrying an audit tag there invited
+      // every generic "a reason_code means trouble" reader to treat a healthy
+      // payload as a blocked one. The status itself is the audit marker.
+      censusMark('BOOTSTRAP_SCENE_SYNTHESIS', 'passed', { runId: null });
+      return {
+        status: 'bootstrap',
+        ref,
+        scene_ref: ref,
+        label: BOOTSTRAP_SCENE_LABEL,
+        time_ref: null,
+        location_refs: [],
+        participant_refs: bootstrapSceneParticipants(runtimeWorld),
+        source_refs: [],
+      };
+    }
     return {
       status: 'unavailable',
       reason_code: 'active_scene_not_initialized',
-      ref: `mnemosyne://chat/${encodeURIComponent(chatId)}/active-scene`,
+      ref,
       source_refs: [],
     };
   }
@@ -753,6 +841,7 @@ export function createContinuityComposer({
   measureTokens,
   storyCraft,
   runJournal = null,
+  dynamicStoryProjector = null,
 } = {}) {
   if (
     !store?.openChatForAdmin
@@ -763,6 +852,8 @@ export function createContinuityComposer({
   const craftConfig = storyCraft === undefined
     ? defaultStoryCraftConfig()
     : normalizeStoryCraftConfig(storyCraft);
+  const projector = dynamicStoryProjector
+    ?? createDynamicStoryProjector({ store });
 
   return Object.freeze({
     async compose({
@@ -772,6 +863,9 @@ export function createContinuityComposer({
       hardCapTokens = MAX_CONTINUITY_TOKENS,
       onCraftDegrade = null,
     }) {
+      censusMark('CONTEXT_COMPOSITION_AVAILABILITY', 'enter', {
+        runId: runScope?.run_id ?? null,
+      });
       if (runScope?.chat_id !== chatId) {
         fail(
           'continuity_payload_scope_mismatch',
@@ -889,6 +983,7 @@ export function createContinuityComposer({
         branchId,
         branchEpoch: runScope.branch_epoch,
         visibleTurnIndex: runScope.visible_turn_index,
+        projector,
       });
       if (latestDynamicTurn !== null && !dynamicProjection) {
         fail(
@@ -1046,6 +1141,10 @@ export function createContinuityComposer({
           runtimeWorld,
           chatId,
           typedLanes.activeScene,
+          // Without a projection there is no verified history to read the
+          // claim from, so "never held a scene" cannot be asserted and the
+          // old refusal stands.
+          dynamicProjection ? dynamicProjection.sceneEverEstablished : true,
         )),
         hard_current_state:
           currentStateSlice.selected.map(mapCurrentState),
@@ -1096,6 +1195,9 @@ export function createContinuityComposer({
       trimToBudget(payload, {
         hardCapTokens: hardCap,
         measureTokens,
+      });
+      censusMark('CONTEXT_COMPOSITION_AVAILABILITY', 'passed', {
+        runId: runScope?.run_id ?? null,
       });
       return validateContinuityPayload(payload, {
         availableInputTokens,

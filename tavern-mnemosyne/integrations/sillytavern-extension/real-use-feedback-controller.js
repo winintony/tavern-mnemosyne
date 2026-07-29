@@ -6,6 +6,7 @@ import {
   buildRealUseFeedbackWithdrawCommand,
   validateRealUseFeedbackQuestionnaire,
 } from './real-use-feedback.js';
+import { censusMark } from './gate-census.js';
 
 const LOCAL_FEEDBACK_CONSENT = Object.freeze({
   storage: 'local_only',
@@ -115,6 +116,7 @@ export function createRealUseFeedbackController({
     const reasonCode =
       error?.reasonCode
       ?? 'real_use_feedback_failed';
+    censusMark('REAL_USE_FEEDBACK_CONTROLLER', 'blocked', { reasonCode });
     const text = FAILURE_TEXT[reasonCode];
     if (!text) {
       console.warn('[Mnemosyne] feedback failed:', reasonCode, error);

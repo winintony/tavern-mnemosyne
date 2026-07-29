@@ -1,6 +1,6 @@
 {
   "name": "tavern-mnemosyne",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "private": true,
   "type": "module",
   "description": "Preset-native Agentic story memory runtime for SillyTavern.",
@@ -15,7 +15,7 @@
     "test:installed": "node --test tests/contracts/installed-extension-sync.test.js"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.19.0"
   },
   "dependencies": {
     "tiktoken": "^1.0.22",

@@ -1,3 +1,5 @@
+import { censusMark } from './gate-census.js';
+
 function invalidLease(message) {
   const error = new Error(message);
   error.reasonCode = 'host_prompt_budget_invalid';
@@ -31,6 +33,10 @@ function assertContextTokens(contextTokens) {
 }
 
 function settingsConflict(frame) {
+  censusMark('HOST_ASSEMBLY_PROVENANCE', 'blocked', {
+    reasonCode: 'host_prompt_budget_service_settings_changed',
+    runId: null,
+  });
   return {
     status: 'conflict',
     frame_id: frame.frame_id,

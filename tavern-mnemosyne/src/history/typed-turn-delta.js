@@ -1,9 +1,19 @@
 import { MnemosyneRequestError } from '../contracts/errors.js';
 import { canonicalJson, sha256 } from '../contracts/hash.js';
+import { parseMemoryScopeReference } from '../memory/memory-reference.js';
 import { OKF_ENTITY_PREFIXES } from '../okf/schema.js';
 
 const SOURCE_MODES = new Set(['narration', 'dialogue', 'mixed']);
 const ENTITY_REF_PATTERN = /^okf:\/\/entity\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const MAX_PROVIDER_CORRECTION_ISSUES = 16;
+const CORRECTION_FIELD_PATH_PATTERN = (
+  /^records\[\d+\](?:\.[A-Za-z][A-Za-z0-9_]*|\[\d+\])+$/
+);
+const CORRECTION_ACTIONS = new Set([
+  'replace_with_expected_enum',
+  'replace_with_unique_exact_committed_body_span',
+  'use_trusted_canonical_ref',
+]);
 const EVIDENCE_QUOTE_WRAPPERS = new Map([
   ['"', '"'],
   ["'", "'"],
@@ -102,6 +112,19 @@ const SCENE_EVENT_EVIDENCE_SCHEMA = Object.freeze({
 const ENTITY_REF_SCHEMA = Object.freeze({
   type: 'string',
   pattern: '^okf://entity/[A-Za-z0-9][A-Za-z0-9._-]*$',
+});
+const SCENE_REF_SCHEMA = Object.freeze({
+  anyOf: [
+    ENTITY_REF_SCHEMA,
+    {
+      type: 'string',
+      pattern: '^mnemosyne://chat/[^/]+/active-scene$',
+      description: (
+        'The canonical active-scene ref from this run Continuity Payload. '
+        + 'The runtime rejects refs belonging to another chat.'
+      ),
+    },
+  ],
 });
 const NULLABLE_ENTITY_REF_SCHEMA = Object.freeze({
   anyOf: [
@@ -517,7 +540,7 @@ export const PROVIDER_TYPED_RECORD_SCHEMAS = Object.freeze([
     'beat_type',
     'scene_turn',
   ], {
-    scene_ref: ENTITY_REF_SCHEMA,
+    scene_ref: SCENE_REF_SCHEMA,
     time: { type: 'string', minLength: 1 },
     location_ref: NULLABLE_ENTITY_REF_SCHEMA,
     participants: ENTITY_REF_ARRAY_SCHEMA,
@@ -570,6 +593,19 @@ function nonEmptyString(value) {
 
 function entityRef(value) {
   return typeof value === 'string' && ENTITY_REF_PATTERN.test(value);
+}
+
+function sceneRef(value, {
+  chatId,
+  enforceActiveSceneChat = false,
+} = {}) {
+  if (entityRef(value)) return true;
+  const parsed = parseMemoryScopeReference(value);
+  if (parsed?.kind !== 'active_scene_scope') return false;
+  return !enforceActiveSceneChat || (
+    nonEmptyString(chatId)
+    && parsed.chatId === chatId
+  );
 }
 
 function stringArray(value, {
@@ -756,7 +792,13 @@ function evidenceSpan(record, committedBody, recordIndex) {
     fail(
       'turn_delta_event_invalid',
       'scene_event evidence must be objective narration.',
-      { record_index: recordIndex },
+      {
+        record_index: recordIndex,
+        field_path:
+          `records[${recordIndex}].evidence[0].source_mode`,
+        expected: 'narration',
+        action: 'replace_with_expected_enum',
+      },
     );
   }
   const quote = normalizeEvidenceQuote(
@@ -768,14 +810,26 @@ function evidenceSpan(record, committedBody, recordIndex) {
     fail(
       'unsupported_claim',
       'The cited evidence does not occur in the committed body.',
-      { record_index: recordIndex },
+      {
+        record_index: recordIndex,
+        field_path:
+          `records[${recordIndex}].evidence[0].quote_or_ref`,
+        action:
+          'replace_with_unique_exact_committed_body_span',
+      },
     );
   }
   if (committedBody.indexOf(quote, start + quote.length) >= 0) {
     fail(
       'source_quote_ambiguous',
       'The cited evidence occurs more than once in the committed body.',
-      { record_index: recordIndex },
+      {
+        record_index: recordIndex,
+        field_path:
+          `records[${recordIndex}].evidence[0].quote_or_ref`,
+        action:
+          'replace_with_unique_exact_committed_body_span',
+      },
     );
   }
   return {
@@ -963,10 +1017,30 @@ function assertPlotThread(record, recordIndex) {
   }
 }
 
-function assertSceneState(record, recordIndex) {
+function assertSceneState(record, recordIndex, options) {
+  if (!sceneRef(record.scene_ref, options)) {
+    const expectedRef = (
+      options?.enforceActiveSceneChat
+      && nonEmptyString(options?.chatId)
+    )
+      ? (
+          'mnemosyne://chat/'
+          + `${encodeURIComponent(options.chatId)}/active-scene`
+        )
+      : null;
+    fail(
+      'turn_delta_record_invalid',
+      'scene_state.scene_ref must use a trusted canonical scene reference.',
+      {
+        record_index: recordIndex,
+        field_path: `records[${recordIndex}].scene_ref`,
+        ...(expectedRef ? { expected_ref: expectedRef } : {}),
+        action: 'use_trusted_canonical_ref',
+      },
+    );
+  }
   if (
-    !entityRef(record.scene_ref)
-    || !nonEmptyString(record.time)
+    !nonEmptyString(record.time)
     || !(record.location_ref === null || entityRef(record.location_ref))
     || !entityRefArray(record.participants)
     || !stringArray(record.positions)
@@ -982,6 +1056,36 @@ function assertSceneState(record, recordIndex) {
       { record_index: recordIndex },
     );
   }
+}
+
+function safeCorrectionIssue(error) {
+  const details = isObject(error?.details) ? error.details : {};
+  const issue = {
+    reason_code: String(error?.reasonCode ?? ''),
+    message: String(error?.message ?? ''),
+  };
+  if (Number.isInteger(details.record_index)) {
+    issue.record_index = details.record_index;
+  }
+  if (
+    typeof details.field_path === 'string'
+    && CORRECTION_FIELD_PATH_PATTERN.test(details.field_path)
+  ) {
+    issue.field_path = details.field_path;
+  }
+  if (details.expected === 'narration') {
+    issue.expected = details.expected;
+  }
+  if (
+    typeof details.expected_ref === 'string'
+    && sceneRef(details.expected_ref)
+  ) {
+    issue.expected_ref = details.expected_ref;
+  }
+  if (CORRECTION_ACTIONS.has(details.action)) {
+    issue.action = details.action;
+  }
+  return Object.freeze(issue);
 }
 
 function assertStateValue(record, recordIndex) {
@@ -1054,7 +1158,7 @@ function assertStateValue(record, recordIndex) {
   }
 }
 
-function canonicalPayload(record, recordIndex) {
+function canonicalPayload(record, recordIndex, options) {
   switch (record.kind) {
     case 'character':
       assertCharacter(record, recordIndex);
@@ -1123,7 +1227,7 @@ function canonicalPayload(record, recordIndex) {
           : {}),
       };
     case 'scene_state':
-      assertSceneState(record, recordIndex);
+      assertSceneState(record, recordIndex, options);
       return {
         scene_ref: record.scene_ref,
         time: record.time,
@@ -1191,6 +1295,7 @@ export function normalizeProviderTurnRecords(
   records,
   committedBody,
   {
+    chatId,
     turnId,
     candidateId,
   } = {},
@@ -1207,7 +1312,7 @@ export function normalizeProviderTurnRecords(
       'Memory writeback requires the exact committed body.',
     );
   }
-  return records.map((record, recordIndex) => {
+  const normalizeRecord = (record, recordIndex) => {
     const operationCompatibleRecord = (
       record?.kind === 'current_state'
       && record.operation === undefined
@@ -1318,7 +1423,14 @@ export function normalizeProviderTurnRecords(
       };
     }
 
-    const payload = canonicalPayload(operationCompatibleRecord, recordIndex);
+    const payload = canonicalPayload(
+      operationCompatibleRecord,
+      recordIndex,
+      {
+        chatId,
+        enforceActiveSceneChat: true,
+      },
+    );
     return {
       kind,
       entity_ref: canonicalTypedRecordEntityRef({
@@ -1331,5 +1443,34 @@ export function normalizeProviderTurnRecords(
       payload,
       source_span: sourceSpan,
     };
+  };
+  const normalized = [];
+  const validationErrors = [];
+  let omittedIssueCount = 0;
+  records.forEach((record, recordIndex) => {
+    try {
+      normalized.push(normalizeRecord(record, recordIndex));
+    } catch (error) {
+      if (!(error instanceof MnemosyneRequestError)) throw error;
+      if (validationErrors.length < MAX_PROVIDER_CORRECTION_ISSUES) {
+        validationErrors.push(error);
+      } else {
+        omittedIssueCount += 1;
+      }
+    }
   });
+  if (validationErrors.length === 1 && omittedIssueCount === 0) {
+    throw validationErrors[0];
+  }
+  if (validationErrors.length > 0) {
+    fail(
+      'turn_delta_records_invalid',
+      'Memory writeback contains multiple invalid records.',
+      {
+        issues: validationErrors.map(safeCorrectionIssue),
+        omitted_issue_count: omittedIssueCount,
+      },
+    );
+  }
+  return normalized;
 }

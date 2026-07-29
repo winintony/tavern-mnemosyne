@@ -1,4 +1,5 @@
 import { MnemosyneRequestError } from './errors.js';
+import { censusMark } from '../inspection/gate-census.js';
 
 const SCHEMA = 'mnemosyne.continuity-payload.v1';
 const ARRAY_FIELDS = [
@@ -304,6 +305,16 @@ export function validateContinuityPayload(
   payload,
   { availableInputTokens, measureTokens } = {},
 ) {
+  // The contract's allowed run_scope fields (:45) have no run_id — only
+  // active_candidate_id, which the browser side encodes as `run:${runId}`
+  // (integrations/sillytavern-extension/index.js). Carry that honestly
+  // under its own name rather than mislabeling it run_id (Codex re-audit
+  // P1-3); id_source documents why run_id itself stays null.
+  censusMark('CONTINUITY_PAYLOAD_CONTRACT', 'enter', {
+    runId: null,
+    candidateId: payload?.run_scope?.active_candidate_id ?? null,
+    idSource: 'contract_absent',
+  });
   assertObject(payload, 'payload');
 
   if (payload.schema !== SCHEMA) {
@@ -425,6 +436,11 @@ export function validateContinuityPayload(
   }
 
   validated.budget_report.estimated_tokens = measuredTokens;
+  censusMark('CONTINUITY_PAYLOAD_CONTRACT', 'passed', {
+    runId: null,
+    candidateId: validated?.run_scope?.active_candidate_id ?? null,
+    idSource: 'contract_absent',
+  });
   return validated;
 }
 

@@ -516,6 +516,77 @@ async function requireTrustedCoverage({
   });
 }
 
+function selectResolvedFingerprints(
+  resolved,
+  selectedIdentifiers,
+) {
+  const normalizedIdentifiers = sortedUniqueStrings(
+    selectedIdentifiers,
+  );
+  const availableIdentifiers = new Set(
+    resolved.fingerprints.map(
+      fingerprint => fingerprint.identifier,
+    ),
+  );
+  if (
+    !normalizedIdentifiers
+    || normalizedIdentifiers.some(
+      identifier => !availableIdentifiers.has(identifier),
+    )
+  ) {
+    fail(
+      'source_removal_coverage_required',
+      'Trusted removal claim selection returned an invalid subset.',
+      {
+        coverage_reason_code:
+          'source_coverage_claim_selection_invalid',
+      },
+    );
+  }
+  const selected = new Set(normalizedIdentifiers);
+  const fingerprints = resolved.fingerprints.filter(
+    fingerprint => selected.has(fingerprint.identifier),
+  );
+  const fingerprintUnits = resolved.fingerprint_units.filter(
+    fingerprint => selected.has(fingerprint.identifier),
+  );
+  return {
+    fingerprints: structuredClone(fingerprints),
+    fingerprint_units: structuredClone(fingerprintUnits),
+    source_unit_refs: [
+      ...new Set(fingerprintUnits.flatMap(
+        fingerprint => fingerprint.source_unit_refs,
+      )),
+    ].sort(),
+  };
+}
+
+function emptyStrictGrantResult({
+  runScope,
+  status,
+}) {
+  return {
+    schema: GRANT_RESULT_SCHEMA,
+    status: 'issued',
+    run_scope: structuredClone(runScope),
+    snapshot_id: status.snapshotId,
+    source_snapshot_hash: status.sourceSnapshotHash,
+    absorbed_source_kinds: [...status.absorbedKinds].sort(),
+    source_unit_refs: [],
+    certificate_ids: [],
+    accepted_targets_hash: null,
+    okf_versions: [],
+    projection_id: null,
+    projection_hash: null,
+    runtime_view_hash: null,
+    coverage_policy: 'strict',
+    reader_capability_version: READER_CAPABILITY_VERSION,
+    coverage_binding: null,
+    coverage_binding_hash: null,
+    grants: [],
+  };
+}
+
 function grantIdentityPayload(grant) {
   return {
     schema: GRANT_SCHEMA,
@@ -731,6 +802,7 @@ export function createSourceRemovalGrantService({
   store,
   now = () => new Date(),
   coveragePolicy = 'legacy',
+  trustedRemovalClaimSelector = null,
   trustedCoverageVerifier = null,
 } = {}) {
   if (
@@ -745,6 +817,14 @@ export function createSourceRemovalGrantService({
   if (!['legacy', 'strict'].includes(coveragePolicy)) {
     throw new Error(
       `Unsupported source-removal coverage policy: ${coveragePolicy}`,
+    );
+  }
+  if (
+    trustedRemovalClaimSelector !== null
+    && typeof trustedRemovalClaimSelector !== 'function'
+  ) {
+    throw new TypeError(
+      'Trusted removal claim selector must be a function.',
     );
   }
 
@@ -838,7 +918,7 @@ export function createSourceRemovalGrantService({
         );
       }
       validatePromptFingerprints(promptFingerprints);
-      const resolved = promptFingerprints.length === 0
+      let resolved = promptFingerprints.length === 0
         ? {
           fingerprints: [],
           fingerprint_units: [],
@@ -848,6 +928,33 @@ export function createSourceRemovalGrantService({
           promptFingerprints,
           snapshot: status.snapshot,
         });
+      if (
+        coveragePolicy === 'strict'
+        && resolved.fingerprints.length > 0
+        && trustedRemovalClaimSelector
+      ) {
+        const selectedIdentifiers =
+          await trustedRemovalClaimSelector(Object.freeze({
+            chatId,
+            snapshotId: status.snapshotId,
+            sourceSnapshotHash: status.sourceSnapshotHash,
+            sourceSetHash: sourceHash,
+            sources: structuredClone(sources),
+            promptFingerprints: structuredClone(
+              resolved.fingerprints,
+            ),
+          }));
+        resolved = selectResolvedFingerprints(
+          resolved,
+          selectedIdentifiers,
+        );
+        if (resolved.fingerprints.length === 0) {
+          return emptyStrictGrantResult({
+            runScope: normalizedRunScope,
+            status,
+          });
+        }
+      }
       const coverageBinding = await requireTrustedCoverage({
         coveragePolicy,
         trustedCoverageVerifier,

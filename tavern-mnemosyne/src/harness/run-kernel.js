@@ -1,5 +1,8 @@
+import { randomUUID } from 'node:crypto';
+
 import { MnemosyneRequestError } from '../contracts/errors.js';
 import { canonicalJson, sha256 } from '../contracts/hash.js';
+import { censusMark } from '../inspection/gate-census.js';
 import {
   appendPromptStep,
   assertPromptSpine,
@@ -24,6 +27,9 @@ import {
 import {
   STORY_COVERAGE_FACETS,
 } from '../memory/story-coverage.js';
+import {
+  parseModelToolArguments,
+} from '../intake/static-lore-model-response.js';
 
 const MEMORY_READER_CAPABILITY_VERSION =
   'mnemosyne.memory-reader.v2';
@@ -210,7 +216,7 @@ function fail(reasonCode, message, details) {
   throw new MnemosyneRequestError(reasonCode, message, details);
 }
 
-function parseToolCall(response) {
+function parseToolCall(response, { runId = null } = {}) {
   const message = response?.assistant_message;
   const calls = message?.tool_calls;
   if (
@@ -255,7 +261,16 @@ function parseToolCall(response) {
   }
   let args;
   try {
-    args = JSON.parse(serializedArguments);
+    args = parseModelToolArguments(serializedArguments, {
+      onRepair() {
+        censusMark('MAIN_AI_TOOL_ARGUMENT_REPAIR', 'passed', {
+          runId,
+          reasonCode: 'unescaped_json_string_quote',
+          stage: name,
+          cls: 'repaired=true',
+        });
+      },
+    });
   } catch {
     fail(
       'main_ai_tool_arguments_invalid',
@@ -776,7 +791,11 @@ export function createRunKernel({
   maxMemoryReadTokens = DEFAULT_MAX_MEMORY_READ_TOKENS,
   qualityTelemetry = null,
   continuityRules = null,
+  onProgress = null,
 } = {}) {
+  if (onProgress !== null && typeof onProgress !== 'function') {
+    throw new Error('Run Kernel onProgress must be a function.');
+  }
   if (!provider?.completeToolStep) {
     throw new Error('Run Kernel requires a provider adapter.');
   }
@@ -875,6 +894,10 @@ export function createRunKernel({
       runEvidence = null,
       signal,
     }) {
+      censusMark('ROOT_ACCEPTANCE_KERNEL_PREFETCH', 'enter', {
+        runId: runScope?.run_id ?? null,
+        stage: 'kernel',
+      });
       const runId = runScope?.run_id;
       const activeRunKey = canonicalJson([
         runScope?.chat_id ?? null,
@@ -887,7 +910,62 @@ export function createRunKernel({
         );
       }
       activeRuns.add(activeRunKey);
+      // Progress observation seam (design 4.1). Never carries story or
+      // memory prose: counts, tool names, step indexes and codes only.
+      const attemptId = `attempt_${randomUUID()}`;
+      const progressCounts = {
+        searchHits: 0,
+        readItems: 0,
+        writtenItems: 0,
+      };
+      let progressSeq = 0;
+      let progressStep = 0;
+      let progressOutcome = null;
+      let terminalProgressEmitted = false;
+      const emitProgress = (type, fields = {}) => {
+        const seq = progressSeq;
+        progressSeq += 1;
+        if (!onProgress) return;
+        try {
+          const observed = onProgress({
+            chatId: runScope?.chat_id ?? null,
+            runId: runId ?? null,
+            attemptId,
+            seq,
+            at: Date.now(),
+            type,
+            ...fields,
+          });
+          // An async observer must not leave an unhandled rejection behind.
+          if (typeof observed?.then === 'function') {
+            observed.then(undefined, () => {});
+          }
+        } catch {
+          // A progress observer must never break the root turn.
+        }
+      };
+      const emitTerminalProgress = () => {
+        if (terminalProgressEmitted) return;
+        terminalProgressEmitted = true;
+        if (progressOutcome?.type === 'run_completed') {
+          emitProgress('run_completed', {
+            summary: {
+              steps: progressStep,
+              ...progressCounts,
+            },
+          });
+          return;
+        }
+        if (progressOutcome?.type === 'run_aborted') {
+          emitProgress('run_aborted', {});
+          return;
+        }
+        emitProgress('run_failed', {
+          reason: progressOutcome?.reason ?? 'root_turn_incomplete',
+        });
+      };
       try {
+      emitProgress('run_started', {});
       const lockedMessages = structuredClone(requestBody?.messages);
       const promptLock = await lockPromptSpine(lockedMessages, { runId });
       const requestHash = sha256(canonicalJson({
@@ -918,6 +996,7 @@ export function createRunKernel({
         });
         const journal = begun.journal;
         if (journal.state === 'completed' && journal.result) {
+          progressOutcome = { type: 'run_completed' };
           return structuredClone(journal.result);
         }
         if (
@@ -926,6 +1005,10 @@ export function createRunKernel({
         ) {
           let settled;
           let projection;
+          emitProgress('tool_started', {
+            tool: 'memory_write_turn_delta',
+            step: progressStep,
+          });
           try {
             ({ settled, projection } = await chatWriteCoordinator.run(
               runScope.chat_id,
@@ -947,6 +1030,10 @@ export function createRunKernel({
               },
             ));
           } catch (error) {
+            emitProgress('tool_failed', {
+              tool: 'memory_write_turn_delta',
+              step: progressStep,
+            });
             await runJournal.checkpoint({
               chatId: runScope.chat_id,
               runId,
@@ -962,6 +1049,17 @@ export function createRunKernel({
               },
             );
           }
+          const recoveredRecordCount = Array.isArray(
+            journal.pending_writeback.commit_input?.delta?.records,
+          )
+            ? journal.pending_writeback.commit_input.delta.records.length
+            : 0;
+          progressCounts.writtenItems += recoveredRecordCount;
+          emitProgress('tool_finished', {
+            tool: 'memory_write_turn_delta',
+            step: progressStep,
+            meta: { writtenItems: recoveredRecordCount },
+          });
           const recovered = rootTurnResult({
             runId,
             committed: journal.committed,
@@ -1009,6 +1107,7 @@ export function createRunKernel({
               result_hash: sha256(canonicalJson(recoveredWriteback)),
             },
           });
+          progressOutcome = { type: 'run_completed' };
           return recovered;
         }
         if (begun.status === 'existing') {
@@ -1084,8 +1183,12 @@ export function createRunKernel({
         if (signal?.aborted) {
           fail('root_turn_cancelled', 'The root turn was cancelled.');
         }
+        progressStep = step;
         await assertPromptSpine(promptLock, messages);
-        const response = await provider.completeToolStep({
+        emitProgress('provider_call_started', { step });
+        let response;
+        try {
+        response = await provider.completeToolStep({
           runId,
           stepIndex: step,
           providerBudget:
@@ -1112,11 +1215,16 @@ export function createRunKernel({
           authContext: providerAuthContext,
           signal,
         });
+        } finally {
+          // Closes the started provider call on every exit, including a
+          // provider throw or an abort mid-flight.
+          emitProgress('provider_call_finished', { step });
+        }
         model = response?.model ?? model;
         addUsage(aggregateUsage, response?.usage);
         let parsed;
         try {
-          parsed = parseToolCall(response);
+          parsed = parseToolCall(response, { runId });
         } catch (error) {
           const protocolCalls =
             response?.assistant_message?.tool_calls;
@@ -1133,6 +1241,10 @@ export function createRunKernel({
             ))
           );
           if (!correctableProtocolError) {
+            emitProgress('tool_failed', {
+              tool: 'main_ai_tool_protocol',
+              step,
+            });
             if (runJournal) {
               await runJournal.checkpoint({
                 chatId: runScope.chat_id,
@@ -1156,6 +1268,11 @@ export function createRunKernel({
             throw error;
           }
           protocolCorrections += 1;
+          emitProgress('tool_rejected', {
+            tool: 'main_ai_tool_protocol',
+            step,
+            code: error?.reasonCode ?? null,
+          });
           const terminal = (
             protocolCorrections > MAX_PROTOCOL_CORRECTIONS
             || step + 1 >= maxToolSteps
@@ -1231,7 +1348,18 @@ export function createRunKernel({
               ? normalizeMemoryReadIntent(executionParsed.args)
               : null;
         const rejectCorrectableRetrieval = async error => {
-          if (!isCorrectableRetrievalError(error)) throw error;
+          if (!isCorrectableRetrievalError(error)) {
+            emitProgress('tool_failed', {
+              tool: executionParsed.name,
+              step,
+            });
+            throw error;
+          }
+          emitProgress('tool_rejected', {
+            tool: executionParsed.name,
+            step,
+            code: error?.reasonCode ?? null,
+          });
           retrievalCorrections += 1;
           const terminal = (
             retrievalCorrections > MAX_RETRIEVAL_CORRECTIONS
@@ -1291,6 +1419,10 @@ export function createRunKernel({
             );
           }
           let searchResult;
+          emitProgress('tool_started', {
+            tool: 'memory_search',
+            step,
+          });
           try {
             searchResult = await memoryReader.search({
               chatId: runScope.chat_id,
@@ -1312,6 +1444,15 @@ export function createRunKernel({
             await rejectCorrectableRetrieval(error);
             continue;
           }
+          const searchHitCount = Array.isArray(searchResult.results)
+            ? searchResult.results.length
+            : 0;
+          progressCounts.searchHits += searchHitCount;
+          emitProgress('tool_finished', {
+            tool: 'memory_search',
+            step,
+            meta: { searchHits: searchHitCount },
+          });
           const searchToolMessage = toolResultMessage(
             parsed.call.id,
             parsed.name,
@@ -1354,6 +1495,7 @@ export function createRunKernel({
             );
           }
           let readResult;
+          emitProgress('tool_started', { tool: 'memory_read', step });
           try {
             validateMemoryReadRequest(
               executionParsed.args,
@@ -1443,6 +1585,15 @@ export function createRunKernel({
             await rejectCorrectableRetrieval(correctedError);
             continue;
           }
+          const readItemCount = Array.isArray(readResult.entries)
+            ? readResult.entries.length
+            : 0;
+          progressCounts.readItems += readItemCount;
+          emitProgress('tool_finished', {
+            tool: 'memory_read',
+            step,
+            meta: { readItems: readItemCount },
+          });
           const readToolMessage = toolResultMessage(
             parsed.call.id,
             parsed.name,
@@ -1489,8 +1640,13 @@ export function createRunKernel({
               'story.commit requires non-empty final prose.',
             );
           }
+          emitProgress('tool_started', { tool: 'story_commit', step });
           const bodyHash = sha256(parsed.args.body);
           if (committed && committed.body_hash !== bodyHash) {
+            emitProgress('tool_failed', {
+              tool: 'story_commit',
+              step,
+            });
             fail(
               'story_commit_already_locked',
               'The root turn already locked different final prose.',
@@ -1508,6 +1664,11 @@ export function createRunKernel({
             span_map_version: 1,
             status: 'locked',
           };
+          emitProgress('tool_finished', {
+            tool: 'story_commit',
+            step,
+            meta: {},
+          });
           const commitToolMessage = toolResultMessage(
             parsed.call.id,
             parsed.name,
@@ -1555,6 +1716,10 @@ export function createRunKernel({
           let settled;
           let commitInput;
           let projection;
+          emitProgress('tool_started', {
+            tool: 'memory_write_turn_delta',
+            step,
+          });
           try {
             const writebackReason = normalizeWritebackReason(
               parsed.args.reason,
@@ -1582,6 +1747,7 @@ export function createRunKernel({
                   parsed.args.records,
                   committed.body,
                   {
+                    chatId: runScope.chat_id,
                     turnId: runScope.turn_id,
                     candidateId: runScope.candidate_id,
                   },
@@ -1639,6 +1805,11 @@ export function createRunKernel({
               && writebackCorrections
                 < MAX_WRITEBACK_CORRECTIONS
             ) {
+              emitProgress('tool_rejected', {
+                tool: 'memory_write_turn_delta',
+                step,
+                code: error?.reasonCode ?? null,
+              });
               writebackCorrections += 1;
               const errorToolMessage = toolErrorMessage(
                 parsed.call.id,
@@ -1671,6 +1842,10 @@ export function createRunKernel({
               }
               continue;
             }
+            emitProgress('tool_failed', {
+              tool: 'memory_write_turn_delta',
+              step,
+            });
             if (runJournal) {
               const correctable =
                 isCorrectableWritebackError(error);
@@ -1735,6 +1910,17 @@ export function createRunKernel({
             }
             throw error;
           }
+          const writtenRecordCount = Array.isArray(
+            commitInput?.delta?.records,
+          )
+            ? commitInput.delta.records.length
+            : 0;
+          progressCounts.writtenItems += writtenRecordCount;
+          emitProgress('tool_finished', {
+            tool: 'memory_write_turn_delta',
+            step,
+            meta: { writtenItems: writtenRecordCount },
+          });
           const result = rootTurnResult({
             runId,
             committed,
@@ -1850,6 +2036,7 @@ export function createRunKernel({
               }
             }
           }
+          progressOutcome = { type: 'run_completed' };
           return result;
         }
 
@@ -1863,7 +2050,31 @@ export function createRunKernel({
         'main_ai_tool_budget_exhausted',
         'The root turn exceeded its tool-step budget.',
       );
+      } catch (error) {
+        const reason = error?.reasonCode ?? 'root_turn_failed';
+        // Only a genuine cancellation reports as aborted. An aborted signal
+        // must never relabel a real failure (writeback partial success in
+        // particular) as a clean stop.
+        progressOutcome = (
+          reason === 'root_turn_cancelled'
+          || error?.name === 'AbortError'
+        )
+          ? { type: 'run_aborted' }
+          : { type: 'run_failed', reason };
+        throw error;
       } finally {
+        // Exactly one terminal progress event per attempt, regardless of
+        // which early return or throw exits the root turn.
+        censusMark(
+          'ROOT_ACCEPTANCE_KERNEL_PREFETCH',
+          progressOutcome?.type === 'run_completed' ? 'passed' : 'blocked',
+          {
+            runId: runScope?.run_id ?? null,
+            reasonCode: progressOutcome?.reason ?? null,
+            stage: 'kernel',
+          },
+        );
+        emitTerminalProgress();
         activeRuns.delete(activeRunKey);
       }
     },

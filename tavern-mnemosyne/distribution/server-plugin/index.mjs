@@ -15,6 +15,11 @@ import {
 import {
   requireSillyTavernBridgeSession,
 } from '../../src/control/sillytavern-bridge-auth.js';
+import {
+  companionExtensionInstalled,
+  completePendingCompanionRemoval,
+  runCompanionTeardown,
+} from '../../src/runtime/companion-teardown.js';
 
 export const info = Object.freeze({
   id: 'tavern-mnemosyne',
@@ -54,7 +59,12 @@ const controlTokenPath = path.join(secretsRoot, 'control-token');
 let companionProcess = null;
 let lastExit = null;
 let startupError = null;
+let uninstallWatchTimer = null;
 const COMPANION_START_TIMEOUT_MS = 30_000;
+const UNINSTALL_POLL_MS = 5_000;
+const sillyTavernRoot = path.resolve(
+  process.env.MNEMOSYNE_SILLYTAVERN_ROOT || process.cwd(),
+);
 
 function serverHeldControlToken() {
   const configured = process.env.MNEMOSYNE_CONTEXT_ACCESS_TOKEN;
@@ -153,7 +163,35 @@ async function startCompanion(contextAccessToken) {
   });
 }
 
+// SillyTavern deletes the extension folder from under us and tells nobody, so
+// the plugin watches for that folder to disappear and cascades the removal
+// itself. A card uninstall and a manual delete both look the same here.
+function watchForExtensionUninstall() {
+  if (uninstallWatchTimer) return;
+  uninstallWatchTimer = setInterval(() => {
+    if (companionExtensionInstalled({ rootDir: sillyTavernRoot })) return;
+    clearInterval(uninstallWatchTimer);
+    uninstallWatchTimer = null;
+    runCompanionTeardown({
+      rootDir: sillyTavernRoot,
+      stopCompanion: exit,
+    }).catch(error => {
+      console.error('[Tavern Mnemosyne] Teardown failed.', error);
+    });
+  }, UNINSTALL_POLL_MS);
+  uninstallWatchTimer.unref?.();
+}
+
 export async function init(router) {
+  // A pending uninstall finishes before anything else starts: the plugin
+  // directory could not delete itself while it was running.
+  const pending = completePendingCompanionRemoval({
+    rootDir: sillyTavernRoot,
+  });
+  if (pending.removed) {
+    console.info('[Tavern Mnemosyne] Companion uninstall completed.');
+    return;
+  }
   const contextAccessToken = serverHeldControlToken();
   router.use(requireSillyTavernBridgeSession);
   let runtimeBaseUrl =
@@ -176,9 +214,14 @@ export async function init(router) {
       process.env.MNEMOSYNE_ENABLE_EVALUATION_BRIDGE === 'true',
   });
   bridge.register(router);
+  watchForExtensionUninstall();
 }
 
 export async function exit() {
+  if (uninstallWatchTimer) {
+    clearInterval(uninstallWatchTimer);
+    uninstallWatchTimer = null;
+  }
   if (!companionProcess) return;
   const child = companionProcess;
   companionProcess = null;

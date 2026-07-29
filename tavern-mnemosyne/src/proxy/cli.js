@@ -27,6 +27,9 @@ import {
   createDormantThreadInspection,
 } from '../inspection/dormant-thread-inspection.js';
 import {
+  createLiveRunActivity,
+} from '../inspection/live-run-activity.js';
+import {
   normalizeStoryCraftConfig,
 } from '../craft/story-craft-config.js';
 import { loadPhraseLexicon } from '../craft/phrase-lexicon.js';
@@ -560,6 +563,10 @@ const continuityRules = (
 )
   ? createContinuityRulesPass({ store: chatSaveStore })
   : null;
+// Live run progress: an in-memory, de-identified projection of kernel
+// progress events, polled by the extension's run status float. Independent
+// of onAudit — that stream stays an audit record and is not sanitized.
+const liveRunActivity = createLiveRunActivity();
 const runKernel = toolProvider
   ? createRunKernel({
       provider: toolProvider,
@@ -573,6 +580,9 @@ const runKernel = toolProvider
       maxMemoryReadTokens: memoryReadMaxTokens,
       qualityTelemetry,
       continuityRules,
+      onProgress(event) {
+        liveRunActivity.emit(event);
+      },
   })
   : null;
 const runtimeBudgetProfile = (
@@ -613,6 +623,7 @@ const proxy = createMnemosyneProxy({
   continuityEvaluationProgram,
   userVisibleRunActivity,
   dormantThreadInspection,
+  liveRunActivity,
   runKernel,
   providerBudgetPolicy,
   runtimeBudgetProfile,

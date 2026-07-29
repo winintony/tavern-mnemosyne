@@ -94,3 +94,22 @@ export function mergeTransportLeaseIntoCustomBody(
       sealGenerationTransportBinding(lease),
   });
 }
+
+// The finalize hook runs inside a generation, where a run is already open but
+// the cached lease may never have been bound: the only call that binds one is
+// the health poll, and it binds nothing when it runs before the run id exists.
+// Without a lease the seal throws, the request is sent down the blocked path
+// with no binding at all, and the proxy answers 409. Resolving one here keeps
+// the request whole instead.
+export async function mergeResolvedTransportLeaseIntoCustomBody(
+  customIncludeBody,
+  { lease = null, resolveLease } = {},
+) {
+  if (typeof resolveLease !== 'function') {
+    throw new Error('A transport lease resolver is required.');
+  }
+  return mergeTransportLeaseIntoCustomBody(
+    customIncludeBody,
+    lease ?? await resolveLease(),
+  );
+}

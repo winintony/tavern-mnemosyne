@@ -1,5 +1,6 @@
 import { buildRuntimeContract } from '../contracts/runtime-contract.js';
 import { validateContinuityPayload } from '../contracts/continuity-payload.js';
+import { censusMark } from '../inspection/gate-census.js';
 
 function contractProbePayload(chatId) {
   return validateContinuityPayload({
@@ -54,6 +55,9 @@ export async function getContextResponse({
 }) {
   if (mode === 'production') {
     if (!continuityComposer || !sourceRemovalGrantService) {
+      censusMark('CONTEXT_RESPONSE_ADMISSION', 'blocked', {
+        reasonCode: 'okf_runtime_not_configured',
+      });
       return {
         schema: 'mnemosyne.context-response.v1',
         status: 'unavailable',
@@ -77,6 +81,15 @@ export async function getContextResponse({
       reason_code:
         'source_coverage_deferred_to_exact_removal_request',
     };
+    // Same contract as continuity-payload.js: run_scope has no run_id, only
+    // active_candidate_id (Codex re-audit P1-3). Carry it under its own
+    // honest name; id_source documents why run_id itself stays null.
+    censusMark('CONTEXT_RESPONSE_ADMISSION', 'passed', {
+      stage: 'production',
+      runId: null,
+      candidateId: request?.run_scope?.active_candidate_id ?? null,
+      idSource: 'contract_absent',
+    });
     return {
       schema: 'mnemosyne.context-response.v1',
       status: 'ready',
@@ -92,6 +105,9 @@ export async function getContextResponse({
   }
 
   if (mode !== 'contract-probe') {
+    censusMark('CONTEXT_RESPONSE_ADMISSION', 'blocked', {
+      reasonCode: 'okf_runtime_not_implemented',
+    });
     return {
       schema: 'mnemosyne.context-response.v1',
       status: 'unavailable',
@@ -100,6 +116,7 @@ export async function getContextResponse({
     };
   }
 
+  censusMark('CONTEXT_RESPONSE_ADMISSION', 'passed', { stage: 'contract-probe' });
   return {
     schema: 'mnemosyne.context-response.v1',
     status: 'ready',

@@ -9,6 +9,17 @@ import {
   staticLoreCatalog,
   staticLoreCurrentStateCatalog,
 } from './static-lore-batch.js';
+import {
+  INTAKE_CONTRACT_REVISION,
+  SOURCE_PARTITION_REVISION,
+} from './static-lore-intake-revisions.js';
+import {
+  completeStaticLoreSourceUnitLedger,
+  openStaticLoreSourceUnitLedger,
+  rebuildStaticLoreSourceUnitLedger,
+  settleStaticLoreSourceUnits,
+  staticLoreArtifactSettlementTime,
+} from './static-lore-unit-settlement.js';
 import { staticLoreSnapshotHash } from './static-lore-source-identity.js';
 import {
   buildStaticLoreSourceUnits,
@@ -18,20 +29,20 @@ import {
   CORE_RELATION_DEFINITIONS,
   OKF_TYPE_DIRECTORIES,
 } from '../okf/schema.js';
-import { resolveStaticLoreEvidenceSpans } from './static-lore-evidence.js';
 import {
   harnessStaticLoreBatchEvidence,
-  staticLoreEvidenceKey,
 } from './static-lore-evidence-harness.js';
 import {
   characterDescriptionEvidenceMode,
 } from './static-lore-evidence-zones.js';
+import {
+  parseStaticLoreToolArguments,
+} from './static-lore-model-response.js';
 
 const TOOL_NAME = 'static_lore_return';
 const EXTRACTION_SCHEMA = 'mnemosyne.static-lore-extraction.v1';
 const SESSION_SCHEMA = 'mnemosyne.static-lore-intake-session.v1';
-const INTAKE_CONTRACT_REVISION = 7;
-const SOURCE_PARTITION_REVISION = 4;
+const MAX_BATCH_ATTEMPTS = 999;
 export const DEFAULT_STATIC_LORE_MAX_INPUT_BYTES = 1_500_000;
 const DEFAULT_MAX_BATCH_BYTES = 3_000;
 const DEFAULT_MAX_BATCH_UNITS = 1;
@@ -46,6 +57,10 @@ const TRANSPORT_FAILURE_REASON_CODES = new Set([
   'static_lore_intake_upstream_response_error',
   'static_lore_intake_upstream_stream_invalid',
   'static_lore_intake_upstream_unreachable',
+]);
+const UNIT_SETTLEMENT_LEGACY_FAILURE_DETAIL_CODES = new Set([
+  'source_unit_not_fully_evidenced',
+  'evidence_span_unmapped',
 ]);
 const INTAKE_CAPABILITY_SCHEMA =
   'mnemosyne.intake-capability-record.v1';
@@ -638,12 +653,6 @@ function safeBatchFailureDetailCode(error) {
   if (/unknown concept|referenced an unknown concept/u.test(cause)) {
     return 'concept_reference_unknown';
   }
-  if (/source unit is not fully evidenced/u.test(cause)) {
-    return 'source_unit_not_fully_evidenced';
-  }
-  if (/evidence span is not mapped to an accepted baseline claim/u.test(cause)) {
-    return 'evidence_span_unmapped';
-  }
   if (/claims-only merge requires an existing concept/u.test(cause)) {
     return 'claims_only_target_missing';
   }
@@ -694,21 +703,6 @@ function retryCorrectionFor(failure) {
       'and must be cited by at least one eligible record.',
     ].join(' ');
   }
-  if (detailCode === 'source_unit_not_fully_evidenced') {
-    return [
-      'Cover every non-whitespace character in the supplied source unit with',
-      'one or more exact evidence_spans. Split long content into contiguous',
-      'quotes no longer than 300 characters, and do not omit headings, labels,',
-      'rules, examples, conditional guidance, or setting details.',
-    ].join(' ');
-  }
-  if (detailCode === 'evidence_span_unmapped') {
-    return [
-      'Map every evidence_span to at least one eligible Imported Baseline Claim',
-      'on a readable concept. Use fact, behavior_rule, conditional_rule,',
-      'voice_pattern, or setting_rule as appropriate for the evidence zone.',
-    ].join(' ');
-  }
   if (reasonCode === 'static_lore_intake_batch_invalid') {
     return [
       'Recheck exact evidence quotes, source_index values, evidence-zone boundaries,',
@@ -734,29 +728,7 @@ function retryCorrectionFor(failure) {
   return null;
 }
 
-function unwrapProviderToolArguments(value) {
-  if (
-    !value
-    || typeof value !== 'object'
-    || Array.isArray(value)
-  ) {
-    return value;
-  }
-  const keys = Object.keys(value);
-  if (keys.length !== 1 || keys[0] !== '$PARAMETER_NAME') {
-    return value;
-  }
-  const wrapped = value[keys[0]];
-  return (
-    wrapped
-    && typeof wrapped === 'object'
-    && !Array.isArray(wrapped)
-  )
-    ? wrapped
-    : value;
-}
-
-function parseExtraction(modelResponse) {
+function parseExtraction(modelResponse, onRepair = undefined) {
   if (modelResponse?.choices?.[0]?.finish_reason === 'length') {
     fail(
       'static_lore_intake_output_truncated',
@@ -777,11 +749,11 @@ function parseExtraction(modelResponse) {
       `Expected ${TOOL_NAME}.`,
     );
   }
+  const rawArguments = toolCall.function.arguments;
   try {
-    const parsed = typeof toolCall.function.arguments === 'string'
-      ? JSON.parse(toolCall.function.arguments)
-      : structuredClone(toolCall.function.arguments);
-    return unwrapProviderToolArguments(parsed);
+    return parseStaticLoreToolArguments(rawArguments, {
+      onRepair,
+    });
   } catch (error) {
     fail(
       'static_lore_intake_tool_arguments_invalid',
@@ -791,102 +763,33 @@ function parseExtraction(modelResponse) {
   }
 }
 
-function sourceUnitText(unit) {
-  if (typeof unit?.data === 'string') return unit.data;
-  if (typeof unit?.data?.content === 'string') return unit.data.content;
-  return JSON.stringify(unit?.data ?? null);
-}
-
-function normalizedSourceText(value) {
-  return String(value ?? '').replace(/\r\n?/g, '\n');
-}
-
-function assertCompleteBatchCoverage({
+function normalizeSettledBatch({
   extraction,
-  normalizedExtraction,
   sourceUnits,
-  nonStoryEvidence = [],
+  aggregate,
 }) {
-  const resolved = resolveStaticLoreEvidenceSpans({
+  const normalized = harnessStaticLoreBatchEvidence({
     extraction,
     sourceUnits,
+    existingConceptKeys: aggregate.concepts.map(
+      concept => concept.concept_key,
+    ),
+    existingConcepts: aggregate.concepts,
   });
-  const spansBySource = Map.groupBy(
-    resolved.spans,
-    span => span.source_ref,
-  );
-  for (const unit of sourceUnits) {
-    const text = normalizedSourceText(sourceUnitText(unit));
-    const covered = new Uint8Array(text.length);
-    for (const span of spansBySource.get(unit.ref) ?? []) {
-      const start = text.indexOf(span.quote);
-      if (start < 0 || text.indexOf(span.quote, start + 1) >= 0) {
-        throw new Error(
-          `Static Lore evidence is not uniquely recoverable in ${unit.ref}.`,
-        );
-      }
-      covered.fill(1, start, start + span.quote.length);
-    }
-    for (const evidence of nonStoryEvidence.filter(candidate => (
-      candidate.source_ref === unit.ref
-    ))) {
-      const start = Number.isInteger(evidence.source_start)
-        ? evidence.source_start
-        : text.indexOf(evidence.quote);
-      if (
-        start < 0
-        || text.slice(start, start + evidence.quote.length)
-          !== evidence.quote
-        || (
-          !Number.isInteger(evidence.source_start)
-          && text.indexOf(evidence.quote, start + 1) >= 0
-        )
-      ) {
-        throw new Error(
-          `Static Lore local control evidence is invalid in ${unit.ref}.`,
-        );
-      }
-      covered.fill(1, start, start + evidence.quote.length);
-    }
-    for (let index = 0; index < text.length; index += 1) {
-      if (!covered[index] && !/\s/u.test(text[index])) {
-        throw new Error(
-          `Static Lore source unit is not fully evidenced: ${unit.ref}.`,
-        );
-      }
-    }
-  }
-
-  const acceptedEvidence = new Set();
-  for (const concept of normalizedExtraction.concepts ?? []) {
-    for (const claim of concept.baseline_claims ?? []) {
-      for (const evidence of claim.evidence ?? []) {
-        acceptedEvidence.add(staticLoreEvidenceKey(
-          evidence.source_ref,
-          evidence.quote,
-        ));
-      }
-    }
-  }
-  const acceptedNonStory = new Set(
-    nonStoryEvidence.map(evidence => staticLoreEvidenceKey(
-      evidence.source_ref,
-      evidence.quote,
-    )),
-  );
-  for (const span of resolved.spans) {
-    const key = staticLoreEvidenceKey(span.source_ref, span.quote);
-    if (
-      acceptedEvidence.has(key)
-      || acceptedNonStory.has(key)
-    ) {
-      continue;
-    }
-    throw new Error(
-      'Static Lore evidence span is not mapped to an accepted '
-      + `baseline claim: ${span.evidence_id}.`,
-    );
-  }
+  const settled = settleStaticLoreSourceUnits({
+    extraction,
+    normalizedExtraction: normalized.extraction,
+    sourceUnits,
+    nonStoryEvidence: normalized.non_story_evidence,
+  });
+  return {
+    extraction: settled.extraction,
+    warnings: [
+      ...normalized.warnings,
+      ...settled.warnings,
+    ],
+    settlements: settled.settlements,
+  };
 }
 
 function portableBatchHash(batch) {
@@ -1051,7 +954,66 @@ export function createStaticLoreExtractionService({
       : [];
     session.reconcile_plan_id ??= null;
     session.reconcile_approved_plan_id ??= null;
+    session.source_unit_ledger ??=
+      openStaticLoreSourceUnitLedger(session.batches);
     return session;
+  }
+
+  function commitSourceUnitSettlements(
+    session,
+    batchIndex,
+    settlements,
+    settledAt,
+  ) {
+    const expectedRefs = session.batches[batchIndex].units.map(
+      unit => unit.ref,
+    );
+    if (
+      settlements.length !== expectedRefs.length
+      || settlements.some(
+        (settlement, index) => (
+          settlement.source_unit_ref !== expectedRefs[index]
+        ),
+      )
+    ) {
+      fail(
+        'static_lore_intake_unit_ledger_invalid',
+        'Static Lore source-unit settlement does not match its batch.',
+        { batch_index: batchIndex },
+      );
+    }
+    for (const settlement of settlements) {
+      const entry = session.source_unit_ledger.find(candidate => (
+        candidate.source_unit_ref === settlement.source_unit_ref
+        && candidate.batch_index === batchIndex
+      ));
+      if (!entry || entry.state !== 'open') {
+        fail(
+          'static_lore_intake_unit_ledger_invalid',
+          'Static Lore source-unit ledger cannot change a terminal state.',
+          {
+            batch_index: batchIndex,
+            source_unit_ref: settlement.source_unit_ref,
+          },
+        );
+      }
+      Object.assign(entry, structuredClone(settlement), {
+        settled_at: settledAt,
+      });
+    }
+  }
+
+  function clearSettledBatchFailures(session, batchIndex, clearedAt) {
+    for (const failure of session.failed_attempts) {
+      if (
+        failure.batch_index !== batchIndex
+        || failure.cleared_at
+      ) {
+        continue;
+      }
+      failure.cleared_at = clearedAt;
+      failure.clear_reason = 'source_unit_batch_committed';
+    }
   }
 
   function applyCurrentSourcePartition(session, {
@@ -1060,11 +1022,26 @@ export function createStaticLoreExtractionService({
     sourcePacketHash,
   }) {
     normalizeSession(session);
+    const isPartitionRevisionUpgrade = (
+      (session.partition_revision ?? 1) !== SOURCE_PARTITION_REVISION
+    );
+    const canInvalidatePaidRevision = (
+      isPartitionRevisionUpgrade
+      && ['active', 'batch_failed'].includes(session.status)
+      && session.in_flight_attempt === null
+      && session.artifacts.length > 0
+      && session.artifacts.length === session.usage_batches.length
+    );
     if (
       session.status === 'completed'
-      || session.next_batch_index !== 0
-      || session.artifacts.length > 0
-      || session.usage_batches.length > 0
+      || (
+        !canInvalidatePaidRevision
+        && (
+          session.next_batch_index !== 0
+          || session.artifacts.length > 0
+          || session.usage_batches.length > 0
+        )
+      )
       || session.in_flight_attempt !== null
     ) {
       fail(
@@ -1077,7 +1054,47 @@ export function createStaticLoreExtractionService({
       source_packet_hash: session.source_packet_hash,
       source_unit_count: session.source_unit_count,
       batch_count: session.batches.length,
+      artifact_count: session.artifacts.length,
     };
+    const paidHistory = [
+      ...session.artifacts,
+      ...session.failed_attempts.filter(record => record.artifact_ref),
+      ...session.invalidated_attempts.filter(record => record.artifact_ref),
+    ];
+    const historicalAttemptFor = record => {
+      const explicit = Number(
+        record.attempt
+        ?? record.request_metadata?.batch_attempt,
+      );
+      if (Number.isInteger(explicit) && explicit > 0) return explicit;
+      return attemptFromRequestId(record.request_id);
+    };
+    const paidAttemptFloorByBatch = new Map();
+    for (const record of paidHistory) {
+      const batchIndex = Number(record.batch_index);
+      if (!Number.isInteger(batchIndex) || batchIndex < 0) continue;
+      paidAttemptFloorByBatch.set(
+        batchIndex,
+        Math.max(
+          paidAttemptFloorByBatch.get(batchIndex) ?? 0,
+          historicalAttemptFor(record),
+        ),
+      );
+    }
+    const invalidatedAt = now().toISOString();
+    if (canInvalidatePaidRevision) {
+      for (const [index, artifact] of session.artifacts.entries()) {
+        session.invalidated_attempts.push({
+          batch_index: artifact.batch_index,
+          request_id: artifact.request_id,
+          artifact_ref: artifact.artifact_ref,
+          response_hash: artifact.response_hash,
+          reason_code: 'source_partition_revision',
+          invalidated_at: invalidatedAt,
+          usage: structuredClone(session.usage_batches[index]),
+        });
+      }
+    }
     const batches = partitionStaticLorePacket(packet, {
       maxBatchBytes,
       maxBatchUnits,
@@ -1089,6 +1106,8 @@ export function createStaticLoreExtractionService({
     session.max_input_bytes = maxInputBytes;
     session.partition_revision = SOURCE_PARTITION_REVISION;
     session.batches = batches;
+    session.source_unit_ledger =
+      openStaticLoreSourceUnitLedger(batches);
     session.next_batch_index = 0;
     session.aggregate = createStaticLoreAggregate(session.snapshot_hash);
     session.merge_warnings = [];
@@ -1096,8 +1115,19 @@ export function createStaticLoreExtractionService({
     session.artifacts = [];
     session.batch_attempt_counts = Array.from(
       { length: batches.length },
-      (_, index) => Number(previousAttempts[index] ?? 1),
+      (_, index) => (
+        canInvalidatePaidRevision && paidAttemptFloorByBatch.has(index)
+          ? Math.max(
+            Number(previousAttempts[index] ?? 1),
+            paidAttemptFloorByBatch.get(index),
+          ) + 1
+          : 1
+      ),
     );
+    if (canInvalidatePaidRevision) {
+      session.status = 'active';
+      session.intake_capability = null;
+    }
     session.completed_at = null;
     session.result = null;
     session.repartition_events.push({
@@ -1109,6 +1139,8 @@ export function createStaticLoreExtractionService({
         source_unit_count: packet.units.length,
         batch_count: batches.length,
       },
+      invalidated_paid_artifact_count:
+        canInvalidatePaidRevision ? previous.artifact_count ?? 0 : 0,
       repartitioned_at: now().toISOString(),
     });
     for (const [requestId, record] of pending) {
@@ -1116,16 +1148,107 @@ export function createStaticLoreExtractionService({
     }
   }
 
-  function requestIdFor(session, batchIndex) {
-    const base = [
+  // Request ids carry the partition revision that minted them. Ids from an
+  // earlier revision are structurally unreachable, so a repartition can never
+  // hand out an id whose paid artifact directory already exists on disk.
+  function requestIdBaseFor(session, batchIndex) {
+    return [
+      'intake_request',
+      session.snapshot_hash.slice(0, 20),
+      `r${Number(session.partition_revision ?? SOURCE_PARTITION_REVISION)}`,
+      String(batchIndex + 1).padStart(3, '0'),
+    ].join('_');
+  }
+
+  // Ids minted before the revision segment existed. Never allocated again,
+  // only recognised when settling attempts persisted by an older build.
+  function legacyRequestIdBaseFor(session, batchIndex) {
+    return [
       'intake_request',
       session.snapshot_hash.slice(0, 20),
       String(batchIndex + 1).padStart(3, '0'),
     ].join('_');
-    const attempt = Number(session.batch_attempt_counts[batchIndex] ?? 1);
+  }
+
+  function requestIdCandidate(session, batchIndex, attempt) {
+    const base = requestIdBaseFor(session, batchIndex);
     return attempt === 1
       ? base
       : `${base}_attempt_${String(attempt).padStart(2, '0')}`;
+  }
+
+  function attemptFromRequestId(requestId) {
+    const suffix = String(requestId ?? '').match(/_attempt_(\d+)$/u);
+    return suffix ? Number(suffix[1]) : 1;
+  }
+
+  // Every request id that a paid attempt has already occupied, across every
+  // audit track and every past partition revision. Ids are never recycled:
+  // one artifact directory per id, for the lifetime of the session.
+  function reservedRequestIds(session) {
+    const reserved = new Set(consumed);
+    const reserve = requestId => {
+      if (typeof requestId === 'string' && requestId) reserved.add(requestId);
+    };
+    for (const artifact of session.artifacts ?? []) {
+      reserve(artifact?.request_id);
+    }
+    for (const record of session.failed_attempts ?? []) {
+      reserve(record?.request_id);
+    }
+    for (const record of session.invalidated_attempts ?? []) {
+      reserve(record?.request_id);
+    }
+    for (const usage of session.usage_batches ?? []) {
+      reserve(usage?.request_id);
+    }
+    reserve(session.in_flight_attempt?.request_id);
+    return reserved;
+  }
+
+  function assertRequestIdUnreserved(session, requestId, {
+    allowInFlightSelf = false,
+  } = {}) {
+    if (
+      allowInFlightSelf
+      && session.in_flight_attempt?.request_id === requestId
+    ) {
+      return;
+    }
+    if (reservedRequestIds(session).has(requestId)) {
+      fail(
+        'static_lore_intake_request_id_reused',
+        'Static Lore Intake request id already belongs to a paid attempt.',
+        { request_id: requestId },
+      );
+    }
+  }
+
+  // Within one revision the attempt counter can still be stale, so allocation
+  // also walks past every id the audit tracks already own.
+  function requestAttemptFor(session, batchIndex) {
+    const reserved = reservedRequestIds(session);
+    let attempt = Number(session.batch_attempt_counts?.[batchIndex] ?? 1);
+    if (!Number.isSafeInteger(attempt) || attempt < 1) attempt = 1;
+    while (reserved.has(requestIdCandidate(session, batchIndex, attempt))) {
+      attempt += 1;
+      if (attempt > MAX_BATCH_ATTEMPTS) {
+        fail(
+          'static_lore_intake_attempt_ids_exhausted',
+          'Static Lore Intake batch has no unused paid request id left.',
+          { batch_index: batchIndex + 1 },
+        );
+      }
+    }
+    return attempt;
+  }
+
+  function requestIdFor(session, batchIndex) {
+    return requestIdCandidate(
+      session,
+      batchIndex,
+      requestAttemptFor(session, batchIndex),
+    );
   }
 
   function totalUsage(session) {
@@ -1310,8 +1433,11 @@ export function createStaticLoreExtractionService({
       );
     }
 
+    const previousLedger = canonicalJson(session.source_unit_ledger);
+    const previousFailures = canonicalJson(session.failed_attempts);
     let aggregate = createStaticLoreAggregate(session.snapshot_hash);
     const warnings = [];
+    const settledBatches = [];
     for (let batchIndex = 0; batchIndex < session.next_batch_index; batchIndex += 1) {
       const record = artifactsByBatch.get(batchIndex);
       if (!record) {
@@ -1352,25 +1478,32 @@ export function createStaticLoreExtractionService({
         );
       }
       try {
-        const normalized = harnessStaticLoreBatchEvidence({
+        const settled = normalizeSettledBatch({
           extraction: extractionFromStoredArtifact({
             artifact,
             snapshotHash: session.snapshot_hash,
             batch: session.batches[batchIndex],
           }),
           sourceUnits: session.batches[batchIndex].units,
-          existingConceptKeys: aggregate.concepts.map(
-            concept => concept.concept_key,
-          ),
-          existingConcepts: aggregate.concepts,
+          aggregate,
         });
         const merged = mergeStaticLoreBatch({
           aggregate,
-          extraction: normalized.extraction,
+          extraction: settled.extraction,
           allowedSourceRefs,
         });
         aggregate = merged.aggregate;
-        warnings.push(...normalized.warnings, ...merged.warnings);
+        warnings.push(...settled.warnings, ...merged.warnings);
+        settledBatches.push({
+          batch_index: batchIndex,
+          settlements: settled.settlements,
+          settled_at: staticLoreArtifactSettlementTime(session, record),
+        });
+        clearSettledBatchFailures(
+          session,
+          batchIndex,
+          staticLoreArtifactSettlementTime(session, record),
+        );
       } catch (error) {
         fail(
           'static_lore_intake_artifact_revalidation_failed',
@@ -1379,12 +1512,29 @@ export function createStaticLoreExtractionService({
         );
       }
     }
+    session.source_unit_ledger = rebuildStaticLoreSourceUnitLedger({
+      batches: session.batches,
+      settledBatches,
+    });
     const changed = (
       canonicalJson(session.aggregate) !== canonicalJson(aggregate)
       || canonicalJson(session.merge_warnings) !== canonicalJson(warnings)
+      || previousLedger !== canonicalJson(session.source_unit_ledger)
+      || previousFailures !== canonicalJson(session.failed_attempts)
     );
     session.aggregate = aggregate;
     session.merge_warnings = warnings;
+    return changed;
+  }
+
+  async function rebuildAndPersistAppliedState(
+    session,
+    { forcePersist = false } = {},
+  ) {
+    const changed = await rebuildAppliedAggregate(session);
+    if (changed || forcePersist) {
+      await persistSession(session);
+    }
     return changed;
   }
 
@@ -1402,7 +1552,12 @@ export function createStaticLoreExtractionService({
     }
     const batchIndex = session.next_batch_index;
     const batch = session.batches[batchIndex];
-    const requestId = requestIdFor(session, batchIndex);
+    const attempt = requestAttemptFor(session, batchIndex);
+    if (Array.isArray(session.batch_attempt_counts)) {
+      session.batch_attempt_counts[batchIndex] = attempt;
+    }
+    const requestId = requestIdCandidate(session, batchIndex, attempt);
+    assertRequestIdUnreserved(session, requestId);
     const latestFailure = [...session.failed_attempts]
       .reverse()
       .find(failure => failure.batch_index === batchIndex);
@@ -1493,6 +1648,21 @@ export function createStaticLoreExtractionService({
       fail(
         'static_lore_intake_session_not_compilable',
         'Static Lore Intake session is not ready for local compilation.',
+      );
+    }
+    if (!completeStaticLoreSourceUnitLedger({
+      batches: session.batches,
+      ledger: session.source_unit_ledger,
+    })) {
+      await rebuildAndPersistAppliedState(session);
+    }
+    if (!completeStaticLoreSourceUnitLedger({
+      batches: session.batches,
+      ledger: session.source_unit_ledger,
+    })) {
+      fail(
+        'static_lore_intake_unit_ledger_invalid',
+        'Static Lore Intake cannot compile before every source unit settles.',
       );
     }
     session.status = 'compile_pending';
@@ -1588,30 +1758,27 @@ export function createStaticLoreExtractionService({
         'Static Lore Intake batch no longer matches its persisted session.',
       );
     }
-    const extraction = parseExtraction(modelResponse);
+    let argumentsRepaired = 0;
+    const extraction = parseExtraction(modelResponse, repairs => {
+      argumentsRepaired = repairs;
+    });
     const usage = measureUsage(record, modelResponse);
     let merged;
     try {
-      const normalized = harnessStaticLoreBatchEvidence({
+      const settled = normalizeSettledBatch({
         extraction,
         sourceUnits: session.batches[record.batchIndex].units,
-        existingConceptKeys: session.aggregate.concepts.map(
-          concept => concept.concept_key,
-        ),
-        existingConcepts: session.aggregate.concepts,
-      });
-      assertCompleteBatchCoverage({
-        extraction,
-        normalizedExtraction: normalized.extraction,
-        sourceUnits: session.batches[record.batchIndex].units,
-        nonStoryEvidence: normalized.non_story_evidence,
+        aggregate: session.aggregate,
       });
       merged = mergeStaticLoreBatch({
         aggregate: session.aggregate,
-        extraction: normalized.extraction,
+        extraction: settled.extraction,
         allowedSourceRefs: record.allowedSourceRefs,
       });
-      merged.warnings.unshift(...normalized.warnings);
+      merged.warnings.unshift(
+        ...settled.warnings,
+      );
+      merged.sourceUnitSettlements = settled.settlements;
     } catch (error) {
       fail(
         'static_lore_intake_batch_invalid',
@@ -1625,13 +1792,29 @@ export function createStaticLoreExtractionService({
     }
     session.aggregate = merged.aggregate;
     session.merge_warnings.push(...merged.warnings);
+    const committedAt = now().toISOString();
+    commitSourceUnitSettlements(
+      session,
+      record.batchIndex,
+      merged.sourceUnitSettlements,
+      committedAt,
+    );
+    clearSettledBatchFailures(
+      session,
+      record.batchIndex,
+      committedAt,
+    );
     session.usage_batches.push(usage);
     session.artifacts.push({
       batch_index: record.batchIndex,
       request_id: record.requestId,
       artifact_ref: artifactRef,
       response_hash: sha256(canonicalJson(modelResponse)),
+      committed_at: committedAt,
       replayed,
+      ...(argumentsRepaired > 0
+        ? { arguments_repaired: argumentsRepaired }
+        : {}),
     });
     session.next_batch_index += 1;
     settleIntakeCapability(session, record.requestId, 'completed');
@@ -1745,23 +1928,14 @@ export function createStaticLoreExtractionService({
     }
     try {
       const extraction = parseExtraction(artifact.model_response);
-      const normalized = harnessStaticLoreBatchEvidence({
+      const settled = normalizeSettledBatch({
         extraction,
         sourceUnits: session.batches[failure.batch_index].units,
-        existingConceptKeys: session.aggregate.concepts.map(
-          concept => concept.concept_key,
-        ),
-        existingConcepts: session.aggregate.concepts,
-      });
-      assertCompleteBatchCoverage({
-        extraction,
-        normalizedExtraction: normalized.extraction,
-        sourceUnits: session.batches[failure.batch_index].units,
-        nonStoryEvidence: normalized.non_story_evidence,
+        aggregate: session.aggregate,
       });
       mergeStaticLoreBatch({
         aggregate: session.aggregate,
-        extraction: normalized.extraction,
+        extraction: settled.extraction,
         allowedSourceRefs:
           session.batches[failure.batch_index].units.map(unit => unit.ref),
       });
@@ -1783,17 +1957,28 @@ export function createStaticLoreExtractionService({
     normalizeSession(session);
     const inFlight = session.in_flight_attempt;
     if (!inFlight) return false;
-    const expectedRequestId = requestIdFor(
-      session,
-      session.next_batch_index,
-    );
+    // The persisted id is the authority for what was dispatched: recomputing
+    // it here would strand an orphan whose attempt counter has since moved,
+    // and an orphan minted before the revision segment still has to settle.
+    const acceptedBases = [
+      requestIdBaseFor(session, session.next_batch_index),
+      legacyRequestIdBaseFor(session, session.next_batch_index),
+    ];
+    const matchedBase = typeof inFlight.request_id === 'string'
+      ? acceptedBases.find(base => inFlight.request_id.startsWith(base))
+      : null;
+    const inFlightSuffix = matchedBase
+      ? inFlight.request_id.slice(matchedBase.length)
+      : null;
     if (
       inFlight.schema !== 'mnemosyne.static-lore-in-flight-attempt.v1'
       || session.status !== 'active'
       || inFlight.batch_index !== session.next_batch_index
-      || inFlight.attempt
-        !== session.batch_attempt_counts[session.next_batch_index]
-      || inFlight.request_id !== expectedRequestId
+      || !Number.isSafeInteger(inFlight.attempt)
+      || inFlight.attempt < 1
+      || !matchedBase
+      || !/^(|_attempt_\d{2,})$/u.test(inFlightSuffix)
+      || attemptFromRequestId(inFlight.request_id) !== inFlight.attempt
       || !Number.isInteger(inFlight.model_request_bytes)
       || inFlight.model_request_bytes <= 0
       || !Number.isInteger(inFlight.model_max_tokens)
@@ -2012,6 +2197,7 @@ export function createStaticLoreExtractionService({
         snapshotId: capture.snapshot_id,
       });
       let sourcePartitionChanged = false;
+      let sourceUnitLedgerMissing = false;
       if (!session) {
         const batches = partitionStaticLorePacket(packet, {
           maxBatchBytes,
@@ -2037,6 +2223,8 @@ export function createStaticLoreExtractionService({
           partition_revision: SOURCE_PARTITION_REVISION,
           status: 'active',
           batches,
+          source_unit_ledger:
+            openStaticLoreSourceUnitLedger(batches),
           next_batch_index: 0,
           aggregate: createStaticLoreAggregate(capture.snapshot_hash),
           merge_warnings: [],
@@ -2086,6 +2274,8 @@ export function createStaticLoreExtractionService({
             'Persisted Static Lore Intake requires its configured fresh authority.',
           );
         }
+        sourceUnitLedgerMissing =
+          !Array.isArray(session.source_unit_ledger);
         normalizeSession(session);
         await recoverInterruptedAttempt(session);
         if (session.model !== mainHostBinding.model) {
@@ -2146,11 +2336,13 @@ export function createStaticLoreExtractionService({
         );
       }
       session.contract_revision = INTAKE_CONTRACT_REVISION;
-      const aggregateChanged = (
-        session.status !== 'completed'
-        && await rebuildAppliedAggregate(session)
-      );
-      if (contractRevisionChanged || aggregateChanged || sourcePartitionChanged) {
+      const aggregateChanged = await rebuildAppliedAggregate(session);
+      if (
+        contractRevisionChanged
+        || aggregateChanged
+        || sourcePartitionChanged
+        || sourceUnitLedgerMissing
+      ) {
         await persistSession(session);
       }
       if (freshIntakeAdmissionGuard) {
@@ -2180,6 +2372,20 @@ export function createStaticLoreExtractionService({
       }
       if (session.status === 'batch_failed') {
         const failure = session.failed_attempts.at(-1);
+        if (
+          failure?.artifact_ref
+          && UNIT_SETTLEMENT_LEGACY_FAILURE_DETAIL_CODES.has(
+            failure.failure_detail_code,
+          )
+        ) {
+          const replayed = await service.replayArtifact({
+            chatId,
+            requestId: failure.request_id,
+          });
+          return replayed.status === 'batch_ready'
+            ? replayed.next_batch
+            : replayed;
+        }
         return {
           schema: 'mnemosyne.static-lore-retry-required.v1',
           status: 'retry_required',
@@ -2269,6 +2475,8 @@ export function createStaticLoreExtractionService({
           'Static Lore Intake has no failed batch available for explicit retry.',
         );
       }
+      const sourceUnitLedgerMissing =
+        !Array.isArray(session.source_unit_ledger);
       normalizeSession(session);
       if (
         session?.session_id !== sessionId
@@ -2301,6 +2509,9 @@ export function createStaticLoreExtractionService({
           'Static Lore Intake sources must be prepared under the current partition before retry.',
         );
       }
+      await rebuildAndPersistAppliedState(session, {
+        forcePersist: sourceUnitLedgerMissing,
+      });
       await enrichFailureDetailFromArtifact(
         session,
         session.failed_attempts.at(-1),
@@ -2622,6 +2833,7 @@ export function createStaticLoreExtractionService({
               'Static Lore Intake session cannot start this paid request.',
             );
           }
+          assertRequestIdUnreserved(dispatchSession, requestId);
           const dispatchStartedAt = now().toISOString();
           dispatchCapability.state = 'dispatch_started';
           dispatchCapability.claimed_at = dispatchStartedAt;
@@ -2673,6 +2885,8 @@ export function createStaticLoreExtractionService({
           'Static Lore Intake artifact rebase requires both source and target sessions.',
         );
       }
+      const sourceUnitLedgerMissing =
+        !Array.isArray(source.source_unit_ledger);
       normalizeSession(source);
       normalizeSession(target);
       if (
@@ -2695,6 +2909,9 @@ export function createStaticLoreExtractionService({
           'Static Lore Intake sessions are not eligible for paid artifact rebase.',
         );
       }
+      await rebuildAndPersistAppliedState(source, {
+        forcePersist: sourceUnitLedgerMissing,
+      });
 
       const sourceArtifacts = [...source.artifacts]
         .sort((left, right) => left.batch_index - right.batch_index);
@@ -2755,21 +2972,24 @@ export function createStaticLoreExtractionService({
           ...structuredClone(sourceExtraction),
           snapshot_hash: target.snapshot_hash,
         };
-        const normalized = harnessStaticLoreBatchEvidence({
+        const settled = normalizeSettledBatch({
           extraction: targetExtraction,
           sourceUnits: targetBatch.units,
-          existingConceptKeys: aggregate.concepts.map(
-            concept => concept.concept_key,
-          ),
-          existingConcepts: aggregate.concepts,
+          aggregate,
         });
         const merged = mergeStaticLoreBatch({
           aggregate,
-          extraction: normalized.extraction,
+          extraction: settled.extraction,
           allowedSourceRefs: targetBatch.units.map(unit => unit.ref),
         });
         aggregate = merged.aggregate;
-        warnings.push(...normalized.warnings, ...merged.warnings);
+        warnings.push(...settled.warnings, ...merged.warnings);
+        commitSourceUnitSettlements(
+          target,
+          batchIndex,
+          settled.settlements,
+          rebasedAt,
+        );
 
         const targetRequestId = requestIdFor(target, batchIndex);
         const targetArtifact = await store.writeIntakeArtifactForAdmin({
@@ -2817,6 +3037,7 @@ export function createStaticLoreExtractionService({
           request_id: targetRequestId,
           artifact_ref: targetArtifact.relative_path,
           response_hash: targetArtifact.response_hash,
+          committed_at: rebasedAt,
           replayed: true,
           rebased: true,
           rebased_from_request_id: sourceRecord.request_id,
@@ -2895,6 +3116,8 @@ export function createStaticLoreExtractionService({
           'Static Lore Intake cannot reprocess a missing session.',
         );
       }
+      const sourceUnitLedgerMissing =
+        !Array.isArray(session.source_unit_ledger);
       normalizeSession(session);
       const firstInvalidated = Number(fromBatchIndex) - 1;
       if (
@@ -2911,6 +3134,9 @@ export function createStaticLoreExtractionService({
           'Static Lore Intake cannot reprocess the requested completed batches.',
         );
       }
+      await rebuildAndPersistAppliedState(session, {
+        forcePersist: sourceUnitLedgerMissing,
+      });
 
       const previousArtifacts = [...session.artifacts]
         .sort((left, right) => left.batch_index - right.batch_index);
@@ -2963,6 +3189,8 @@ export function createStaticLoreExtractionService({
       session.next_batch_index = firstInvalidated;
       session.aggregate = createStaticLoreAggregate(session.snapshot_hash);
       session.merge_warnings = [];
+      session.source_unit_ledger =
+        openStaticLoreSourceUnitLedger(session.batches);
       session.contract_revision = INTAKE_CONTRACT_REVISION;
       session.status = 'active';
       session.completed_at = null;
@@ -3052,6 +3280,7 @@ export function createStaticLoreExtractionService({
             'Static Lore Intake already has a paid request in progress.',
           );
         }
+        assertRequestIdUnreserved(session, requestId);
         const recordedStartedAt = parsedStartedAt.toISOString();
         session.in_flight_attempt = {
           schema: 'mnemosyne.static-lore-in-flight-attempt.v1',
@@ -3152,6 +3381,37 @@ export function createStaticLoreExtractionService({
       });
     },
 
+    // Fail-closed gate that runs before the provider budget check and before
+    // any upstream dispatch: a reused id must never reach a paid call.
+    async assertPreparedRequestDispatchable({ requestId }) {
+      const record = pending.get(requestId);
+      if (!record || consumed.has(requestId)) {
+        fail(
+          'static_lore_intake_request_unavailable',
+          'Static Lore Intake request is not prepared.',
+        );
+      }
+      const session = await store.readIntakeSessionForAdmin({
+        chatId: record.chatId,
+        snapshotId: record.snapshotId,
+      });
+      if (!session) {
+        fail(
+          'static_lore_intake_session_not_runnable',
+          'Static Lore Intake session cannot start this paid request.',
+        );
+      }
+      normalizeSession(session);
+      assertRequestIdUnreserved(session, requestId, {
+        allowInFlightSelf: true,
+      });
+      return {
+        schema: 'mnemosyne.static-lore-intake-dispatch-guard.v1',
+        status: 'dispatchable',
+        request_id: requestId,
+      };
+    },
+
     verifyPreparedModelRequest({ requestId, requestBody }) {
       const record = pending.get(requestId);
       if (!record || consumed.has(requestId)) {
@@ -3240,28 +3500,46 @@ export function createStaticLoreExtractionService({
           'Static Lore Intake requires its configured fresh authority.',
         );
       }
-      const artifact = await store.writeIntakeArtifactForAdmin({
-        chatId: record.chatId,
-        requestId,
-        modelResponse,
-        requestMetadata: {
-          chat_id: record.chatId,
-          snapshot_id: record.snapshotId,
-          snapshot_hash: record.snapshotHash,
-          session_id: record.sessionId,
-          batch_index: record.batchIndex,
-          contract_revision: record.contractRevision,
-          partition_revision: record.partitionRevision,
-          model: record.model,
-          allowed_source_refs: record.allowedSourceRefs,
-          prepared_at: record.preparedAt,
-          model_request_bytes: record.modelRequestBytes,
-          model_max_tokens: record.modelMaxTokens,
-          attempt: record.attempt ?? 1,
-          intake_authority_hash:
-            record.intakeAuthority?.authority_hash ?? null,
-        },
-      });
+      let artifact;
+      try {
+        artifact = await store.writeIntakeArtifactForAdmin({
+          chatId: record.chatId,
+          requestId,
+          modelResponse,
+          requestMetadata: {
+            chat_id: record.chatId,
+            snapshot_id: record.snapshotId,
+            snapshot_hash: record.snapshotHash,
+            session_id: record.sessionId,
+            batch_index: record.batchIndex,
+            contract_revision: record.contractRevision,
+            partition_revision: record.partitionRevision,
+            model: record.model,
+            allowed_source_refs: record.allowedSourceRefs,
+            prepared_at: record.preparedAt,
+            model_request_bytes: record.modelRequestBytes,
+            model_max_tokens: record.modelMaxTokens,
+            attempt: record.attempt ?? 1,
+            intake_authority_hash:
+              record.intakeAuthority?.authority_hash ?? null,
+          },
+        });
+      } catch (error) {
+        // The paid response cannot be persisted. Settle the in-flight ledger
+        // here so the session never strands on an unresolvable attempt.
+        await recordBatchFailure({
+          record,
+          artifactRef: null,
+          modelResponse,
+          error: new MnemosyneRequestError(
+            'static_lore_intake_artifact_persist_failed',
+            'Static Lore Intake could not persist its paid response.',
+          ),
+        });
+        consumed.add(requestId);
+        pending.delete(requestId);
+        throw error;
+      }
       consumed.add(requestId);
       pending.delete(requestId);
       try {
@@ -3320,6 +3598,9 @@ export function createStaticLoreExtractionService({
         chatId,
         snapshotId,
       });
+      const sourceUnitLedgerMissing = (
+        session && !Array.isArray(session.source_unit_ledger)
+      );
       if (session) normalizeSession(session);
       const currentBatchHasFailedArtifact = session?.failed_attempts?.some(
         failure => (
@@ -3350,6 +3631,9 @@ export function createStaticLoreExtractionService({
           'Static Lore Intake has no failed artifact available for recovery.',
         );
       }
+      await rebuildAndPersistAppliedState(session, {
+        forcePersist: sourceUnitLedgerMissing,
+      });
       if (preparedRetryWasLostOnRestart) {
         session.status = 'batch_failed';
         await persistSession(session);
@@ -3368,6 +3652,7 @@ export function createStaticLoreExtractionService({
           seen.add(failure.request_id);
           return true;
         });
+      let staleCandidateCount = 0;
       for (const failure of candidates) {
         const artifact = await store.readIntakeArtifactForAdmin({
           chatId,
@@ -3379,36 +3664,33 @@ export function createStaticLoreExtractionService({
           || metadata?.chat_id !== chatId
           || metadata?.snapshot_id !== snapshotId
           || metadata?.session_id !== sessionId
-          || metadata?.batch_index !== session.next_batch_index
-          || metadata?.contract_revision !== session.contract_revision
-          || metadata?.partition_revision !== session.partition_revision
         ) {
           fail(
             'static_lore_intake_artifact_integrity_failed',
             'A failed paid artifact no longer matches its intake session.',
           );
         }
+        // History from a superseded partition or contract is not corruption:
+        // its batch boundaries simply no longer exist. Skip, never hard-fail.
+        if (
+          metadata?.contract_revision !== session.contract_revision
+          || metadata?.partition_revision !== session.partition_revision
+          || metadata?.batch_index !== session.next_batch_index
+        ) {
+          staleCandidateCount += 1;
+          continue;
+        }
         try {
           const extraction = parseExtraction(artifact.model_response);
-          const normalized = harnessStaticLoreBatchEvidence({
+          const settled = normalizeSettledBatch({
             extraction,
             sourceUnits:
               session.batches[session.next_batch_index].units,
-            existingConceptKeys: session.aggregate.concepts.map(
-              concept => concept.concept_key,
-            ),
-            existingConcepts: session.aggregate.concepts,
-          });
-          assertCompleteBatchCoverage({
-            extraction,
-            normalizedExtraction: normalized.extraction,
-            sourceUnits:
-              session.batches[session.next_batch_index].units,
-            nonStoryEvidence: normalized.non_story_evidence,
+            aggregate: session.aggregate,
           });
           mergeStaticLoreBatch({
             aggregate: session.aggregate,
-            extraction: normalized.extraction,
+            extraction: settled.extraction,
             allowedSourceRefs:
               session.batches[session.next_batch_index].units
                 .map(unit => unit.ref),
@@ -3435,6 +3717,7 @@ export function createStaticLoreExtractionService({
         batch_index: session.next_batch_index + 1,
         batch_count: session.batches.length,
         recovery_candidate_count: candidates.length,
+        stale_candidate_count: staleCandidateCount,
         failure_reason_code:
           latestFailure?.reason_code
           ?? 'static_lore_intake_batch_failed',
@@ -3471,6 +3754,13 @@ export function createStaticLoreExtractionService({
         requestId,
         'model-response.json',
       ].join('/');
+      if (session?.session_id === metadata.session_id) {
+        const sourceUnitLedgerMissing =
+          !Array.isArray(session.source_unit_ledger);
+        await rebuildAndPersistAppliedState(session, {
+          forcePersist: sourceUnitLedgerMissing,
+        });
+      }
       if (
         session?.session_id === metadata.session_id
         && session.status === 'compile_pending'

@@ -165,6 +165,17 @@ const operations = [
     retryClass: 'safe',
   }),
   operation({
+    operationId: 'activity/live',
+    runtimeTarget: {
+      method: 'POST',
+      path: '/v1/mnemosyne/activity/live',
+    },
+    maxBodyBytes: 64 * KiB,
+    timeoutMs: 15_000,
+    mutatesState: false,
+    retryClass: 'safe',
+  }),
+  operation({
     operationId: 'activity/dormant-threads',
     runtimeTarget: {
       method: 'POST',
@@ -255,6 +266,10 @@ export const RUNTIME_PRIVATE_ROUTE_CLASSIFICATION = Object.freeze({
   '/v1/mnemosyne/activity/dormant-threads': classification(
     'open',
     'Published read-only dormant-thread statistics panel.',
+  ),
+  '/v1/mnemosyne/activity/live': classification(
+    'open',
+    'Published read-only live run progress snapshot for the status float.',
   ),
   '/v1/mnemosyne/capabilities': classification(
     'excluded',

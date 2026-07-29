@@ -524,6 +524,7 @@ export function createControlledAuthorityEditService({
           support_strength: 'explicit',
         }],
       }], input.evidenceText, {
+        chatId: input.chatId,
         turnId: `authority-edit-${input.editId}`,
         candidateId: `authority-edit-${input.editId}`,
       });

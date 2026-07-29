@@ -363,6 +363,23 @@ function hasAuthoritativeEvidence(modes) {
   return modes.includes('authoritative');
 }
 
+// Guidance-zone material is exactly what behavior_rule exists for, but models
+// keep filing it as a fact and the whole span goes down with the refused
+// claim. The zone is server-derived and the demotion is deterministic, so the
+// server does what the retry correction asks the model to do instead of
+// charging for another attempt. Only fact is coerced, and only where guidance
+// evidence is present without any authoritative evidence to justify a fact.
+function coercedClaimKind(claim, modes) {
+  if (
+    claim?.claim_kind !== 'fact'
+    || hasAuthoritativeEvidence(modes)
+    || !modes.includes('guidance')
+  ) {
+    return null;
+  }
+  return 'behavior_rule';
+}
+
 function claimIsEligible(claim, modes) {
   if (!CLAIM_KINDS.has(claim?.claim_kind)) {
     throw new Error(`Unsupported Static Lore claim_kind: ${claim?.claim_kind}`);
@@ -500,7 +517,23 @@ export function normalizeStaticLoreBatchEvidence({
       const claimLabel = `${label}:claim:${index}`;
       const resolvedClaim = recordEvidence(claim, spans, claimLabel);
       const claimModes = resolvedClaim.modes;
-      if (!claimIsEligible(claim, claimModes)) {
+      const coercedKind = coercedClaimKind(claim, claimModes);
+      const effectiveClaim = coercedKind
+        ? { ...claim, claim_kind: coercedKind }
+        : claim;
+      if (coercedKind) {
+        resolvedClaim.record.claim_kind = coercedKind;
+        warnings.push({
+          ...warning(
+            'claim_kind_coerced_for_evidence_zone',
+            claimLabel,
+            'guidance_evidence_cannot_carry_a_fact',
+          ),
+          previous_claim_kind: claim.claim_kind,
+          claim_kind: coercedKind,
+        });
+      }
+      if (!claimIsEligible(effectiveClaim, claimModes)) {
         warnings.push(warning(
           'evidence_record_quarantined',
           claimLabel,
@@ -674,3 +707,4 @@ export function normalizeStaticLoreBatchEvidence({
     warnings,
   };
 }
+

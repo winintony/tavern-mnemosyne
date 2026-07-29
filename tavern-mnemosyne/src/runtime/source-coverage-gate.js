@@ -4,13 +4,20 @@ import { DatabaseSync } from 'node:sqlite';
 
 import { MnemosyneRequestError } from '../contracts/errors.js';
 import { canonicalJson, sha256 } from '../contracts/hash.js';
+import { censusMark } from '../inspection/gate-census.js';
 import {
   buildStaticLoreSourceUnits,
 } from '../intake/static-lore-source-units.js';
 import {
   classifyStaticLoreControlUnit,
   classifyStaticLoreListMarkerEvidenceSpan,
+  classifyStaticLoreSampleAnnotationEvidenceSpan,
+  classifyStaticLoreUncitedTitleEvidenceSpan,
   classifyStaticLoreStructuralEvidenceSpan,
+  classifyStaticLoreStructuralLineEvidenceSpan,
+  classifyStaticLoreBlockTitleEvidenceSpan,
+  classifyStaticLoreValueReferenceEvidenceSpan,
+  classifyStaticLoreSymbolRunEvidenceSpan,
   STATIC_LORE_CONTROL_DISPOSITION,
   STATIC_LORE_CONTROL_RECORD_KIND,
   staticLoreControlAcceptanceHash,
@@ -459,6 +466,42 @@ function assertLocalControlTarget(span, context) {
             quote: localQuote,
             sourceStart: span.source_start,
           })
+          ?? classifyStaticLoreStructuralLineEvidenceSpan({
+            unit: context.trustedSourceUnit,
+            quote: localQuote,
+            sourceStart: span.source_start,
+          })
+          ?? classifyStaticLoreSymbolRunEvidenceSpan({
+            unit: context.trustedSourceUnit,
+            quote: localQuote,
+            sourceStart: span.source_start,
+          })
+          ?? classifyStaticLoreSampleAnnotationEvidenceSpan({
+            unit: context.trustedSourceUnit,
+            quote: localQuote,
+            sourceStart: span.source_start,
+          })
+          // The names come from the runtime memory this gate is verifying
+          // against, so a reference is only accepted when the entity it
+          // names is actually there.
+          ?? classifyStaticLoreUncitedTitleEvidenceSpan({
+            unit: context.trustedSourceUnit,
+            quote: localQuote,
+            sourceStart: span.source_start,
+          })
+          ?? classifyStaticLoreBlockTitleEvidenceSpan({
+            unit: context.trustedSourceUnit,
+            quote: localQuote,
+            sourceStart: span.source_start,
+          })
+          ?? classifyStaticLoreValueReferenceEvidenceSpan({
+            unit: context.trustedSourceUnit,
+            quote: localQuote,
+            sourceStart: span.source_start,
+            knownConceptNames: (
+              context.runtimeWorld?.retrieval_handles ?? []
+            ).map(handle => handle?.title),
+          })
         )
         : null
     );
@@ -881,6 +924,7 @@ function certificateId(certificateWithoutId) {
 }
 
 function rejected(certificate, reasonCode) {
+  censusMark('SOURCE_COVERAGE_CERTIFICATION', 'blocked', { reasonCode });
   return {
     schema: VERIFICATION_SCHEMA,
     status: 'rejected',
@@ -903,6 +947,7 @@ export function createSourceCoverageGate({
     sourceUnit,
     readScope,
   } = {}) {
+    censusMark('SOURCE_COVERAGE_CERTIFICATION', 'enter', { runId: null });
     const readerCapabilityVersion = currentReaderVersion(memoryReader);
     assertReadScope(readScope);
     if (typeof sourceUnit?.source_id !== 'string' || !sourceUnit.source_id) {
@@ -1013,6 +1058,7 @@ export function createSourceCoverageGate({
       coverage,
       issued_at: now().toISOString(),
     };
+    censusMark('SOURCE_COVERAGE_CERTIFICATION', 'passed', { runId: null });
     return Object.freeze({
       ...certificate,
       certificate_id: certificateId(certificate),

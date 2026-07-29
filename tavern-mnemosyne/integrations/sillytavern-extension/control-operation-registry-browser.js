@@ -168,6 +168,19 @@ export const CONTROL_OPERATION_REGISTRY = deepFreeze(
     "required_idempotency_field": null,
     "cancelable": false
   },
+  "activity/live": {
+    "operation_id": "activity/live",
+    "runtime_target": {
+      "method": "POST",
+      "path": "/v1/mnemosyne/activity/live"
+    },
+    "max_body_bytes": 65536,
+    "timeout_ms": 15000,
+    "mutates_state": false,
+    "retry_class": "safe",
+    "required_idempotency_field": null,
+    "cancelable": false
+  },
   "activity/dormant-threads": {
     "operation_id": "activity/dormant-threads",
     "runtime_target": {

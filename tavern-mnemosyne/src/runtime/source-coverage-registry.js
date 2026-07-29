@@ -1155,6 +1155,73 @@ export function createSourceCoverageRegistry({
     };
   }
 
+  async function selectRemovalClaimIdentifiers({
+    chatId,
+    snapshotId,
+    sourceSnapshotHash,
+    sourceSetHash,
+    sources,
+    promptFingerprints,
+  } = {}) {
+    const context = await activeContext(store, chatId);
+    if (context.status !== 'ready') {
+      fail(
+        'source_removal_coverage_required',
+        'Trusted source coverage is unavailable for removal claim selection.',
+        { coverage_reason_code: context.reason_code },
+      );
+    }
+    if (
+      snapshotId !== context.active.snapshot_id
+      || sourceSnapshotHash !== context.active.snapshot_hash
+      || sourceSetHash !== context.active.snapshot_hash
+      || staticLoreSnapshotHash(sources)
+        !== context.active.snapshot_hash
+    ) {
+      fail(
+        'source_removal_coverage_required',
+        'Removal claims no longer match the active source snapshot.',
+        { coverage_reason_code: 'source_coverage_snapshot_stale' },
+      );
+    }
+    const resolved = resolvePromptFingerprintSourceUnits({
+      promptFingerprints,
+      snapshot: context.snapshot,
+      units: context.units,
+    });
+    const selected = [];
+    for (const fingerprintUnit of resolved.fingerprint_units) {
+      let owned = true;
+      for (const sourceUnitRef of fingerprintUnit.source_unit_refs) {
+        const unit = context.units.find(
+          candidate => candidate.ref === sourceUnitRef,
+        );
+        if (!unit) {
+          fail(
+            'source_removal_coverage_required',
+            'A removal claim does not map to an active source unit.',
+            {
+              coverage_reason_code:
+                'source_coverage_source_unit_missing',
+              source_unit_ref: sourceUnitRef,
+            },
+          );
+        }
+        const loaded = await loadTrustedManifest({
+          chatId,
+          context,
+          unit,
+          schema: LOOKUP_SCHEMA,
+        });
+        if (loaded.status === 'ready') continue;
+        owned = false;
+        break;
+      }
+      if (owned) selected.push(fingerprintUnit.identifier);
+    }
+    return Object.freeze(selected);
+  }
+
   async function registerSourceUnit({
     chatId,
     sourceUnitRef,
@@ -1602,6 +1669,7 @@ export function createSourceCoverageRegistry({
   }
 
   return Object.freeze({
+    selectRemovalClaimIdentifiers,
     registerSourceUnit,
     registerActiveSnapshot,
     lookupSourceUnit,

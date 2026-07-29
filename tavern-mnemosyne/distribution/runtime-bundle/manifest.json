@@ -1,18 +1,18 @@
 {
   "schema": "mnemosyne.self-contained-runtime-bundle.v1",
-  "runtime_build_id": "tavern-mnemosyne@0.2.6+runtime.b80742bcb15cbf8d",
-  "package_version": "0.2.6",
+  "runtime_build_id": "tavern-mnemosyne@0.2.7+runtime.32fcc66a37296fdf",
+  "package_version": "0.2.7",
   "minimum_node_major": 22,
   "entrypoint": "companion-launcher.mjs",
   "archive": "runtime.tar.gz",
-  "archive_sha256": "95a5a01f2d95f46bceb3e18c64a2db201b85d0e375dfdb933a9b7a8dbd773abc",
-  "archive_bytes": 28378871,
+  "archive_sha256": "5de88c4f61a9b194c581469e55c58d837f231f879d1be72555567550e76a3e07",
+  "archive_bytes": 28508939,
   "release_asset": {
     "repository": "winintony/tavern-mnemosyne",
-    "tag": "v0.2.6",
-    "name": "Tavern-Mnemosyne-Runtime-v0.2.6.tar.gz"
+    "tag": "v0.2.7",
+    "name": "Tavern-Mnemosyne-Runtime-v0.2.7.tar.gz"
   },
-  "content_manifest_sha256": "b80742bcb15cbf8d7022e4b3729d71af3cf5bda1bd42870303177642651157c4",
+  "content_manifest_sha256": "32fcc66a37296fdf249a786ef718f7abce432d0dd11087f9bb5efd8189e023fb",
   "files": [
     {
       "path": "companion-launcher.mjs",
@@ -21,8 +21,8 @@
     },
     {
       "path": "distribution/server-plugin/index.mjs",
-      "sha256": "ea5ec864164a06cc9326a81dc5b693fb736871403a42a4af32c6afa250ee95e8",
-      "bytes": 5475
+      "sha256": "5f892d85ee736f7303610dffdfbf66881dfbf3dce2a7995c9bfb525a96f9d63d",
+      "bytes": 7001
     },
     {
       "path": "node_modules/.bin/yaml",
@@ -2551,13 +2551,13 @@
     },
     {
       "path": "package-lock.json",
-      "sha256": "83629c6410ac3626b8b99f77563932b13cd11f04bbde54b021393cfd032e0d53",
+      "sha256": "6779f0ed0aff552b8d3e79f94aa74b9d15186d7db34505070fdb4b0c043c60f0",
       "bytes": 1436
     },
     {
       "path": "package.json",
-      "sha256": "860fa614071f0b3b96ee52ff24a71428b5a6f2be356aab9d8464053503f13588",
-      "bytes": 845
+      "sha256": "e198da22d005294dc81cf76445fd0df1b07e470d7f679960085028fb8057f5b9",
+      "bytes": 850
     },
     {
       "path": "src/contracts/accepted-baseline-claim.js",
@@ -2571,13 +2571,13 @@
     },
     {
       "path": "src/contracts/continuity-payload.js",
-      "sha256": "f15abd6485a51ba9ebae401de151f98c6a8471d9bb48d2a86d6339366c0a5c79",
-      "bytes": 12209
+      "sha256": "1e75453124cf750516ef37bd6a4b3b706346e20b3947cd24e989c4288615639b",
+      "bytes": 12983
     },
     {
       "path": "src/contracts/errors.js",
-      "sha256": "c8b2cb12003099898da7d527290f0be5f2c8489a5140e05afb5756b46bca958f",
-      "bytes": 265
+      "sha256": "60628a746e928606f714e6297d12499dcdef8fa71466ad2714bd9881a4b4dccb",
+      "bytes": 718
     },
     {
       "path": "src/contracts/hash.js",
@@ -2591,8 +2591,8 @@
     },
     {
       "path": "src/control/control-operation-registry.js",
-      "sha256": "32a621d63b6f69325bc8c564c0b3690696a782490b300bbb85c9271840499827",
-      "bytes": 10099
+      "sha256": "2eedbd90006f11a0a50691902bfeeb6a0a41e90da141f373124e6e487e776ac0",
+      "bytes": 10488
     },
     {
       "path": "src/control/generation-transport-binding.js",
@@ -2741,8 +2741,8 @@
     },
     {
       "path": "src/harness/run-kernel.js",
-      "sha256": "613dffaf4fab6976dfeaa51ef719ac05f8fd7916f8f145002eb140db6928a70e",
-      "bytes": 58454
+      "sha256": "cdc6b867c591da89b36c947978f0f1cb4f62e8c05d81d8a7dc9c6797946639da",
+      "bytes": 65880
     },
     {
       "path": "src/harness/static-baseline-binding.js",
@@ -2771,8 +2771,8 @@
     },
     {
       "path": "src/history/controlled-authority-edit.js",
-      "sha256": "9fe87d4afd6d3080006aa7be857cb6afc4e1e158b3876e8be403cbf91fcd7592",
-      "bytes": 26051
+      "sha256": "a6676c15532773468b3054637d09812cd115824e28e591154595ae4aba14ab35",
+      "bytes": 26081
     },
     {
       "path": "src/history/dynamic-story-projector.js",
@@ -2791,8 +2791,8 @@
     },
     {
       "path": "src/history/typed-turn-delta.js",
-      "sha256": "f0775028bcfebd5c59cc8363ba0ff6dfcb3ad62291b1173964c5f566d8981ea5",
-      "bytes": 35674
+      "sha256": "c8cb484b530bef7f46b90157b673bb54cec955bdf3a7977e15276c7d4495bd26",
+      "bytes": 39675
     },
     {
       "path": "src/host/custom-include-body.js",
@@ -2806,8 +2806,8 @@
     },
     {
       "path": "src/host/prepare-upstream-request.js",
-      "sha256": "8392f9e774b479bda868ebb92a4497b7d89bb2d03d9ebb46d60e80591408a1ba",
-      "bytes": 39103
+      "sha256": "5a9eafd7e1256e04295b62a3ce93ee347f7b0efc88ea16b42256daabc3788b6d",
+      "bytes": 39359
     },
     {
       "path": "src/host/recent-continuity-strip.js",
@@ -2818,6 +2818,16 @@
       "path": "src/inspection/dormant-thread-inspection.js",
       "sha256": "74b186cef16ea586ac97e6595dcc1bcf8fc85fc6a7a026e409844d7a70d62e95",
       "bytes": 5260
+    },
+    {
+      "path": "src/inspection/gate-census.js",
+      "sha256": "6f63a5e949251cc07adf7639c021a88daf6095cff7cd19c8048572e905df6662",
+      "bytes": 8467
+    },
+    {
+      "path": "src/inspection/live-run-activity.js",
+      "sha256": "cba53fb64aa799f56c72bbfa6febebbe3d9b9a0778c2c9e2dd38ec02dc9c22b6",
+      "bytes": 9246
     },
     {
       "path": "src/inspection/user-visible-run-activity.js",
@@ -2831,33 +2841,43 @@
     },
     {
       "path": "src/intake/static-lore-control-units.js",
-      "sha256": "4999e92cbb1122ce4b7ee1830583a01e41893ea46578a104282b873e54d8a5c2",
-      "bytes": 7958
+      "sha256": "950fb4ebd473016745265395bca9b6beecfefcbe3f1b7bf7634b628dd4e8754f",
+      "bytes": 24006
     },
     {
       "path": "src/intake/static-lore-evidence-harness.js",
-      "sha256": "2240088bc895953c284c9c1f4cca248c398f744dc94931be77874a0c5a6ec9a9",
-      "bytes": 7824
+      "sha256": "a9254b3b5435ed587d6e7cede036a38a114c6bc2bb9b62a46994c40a0cb1d54c",
+      "bytes": 18863
     },
     {
       "path": "src/intake/static-lore-evidence-zones.js",
-      "sha256": "a7d5cc6d6bf3441bd9bb13119656c395dc5b96a78e9eca7a70e14fb4e72e26a4",
-      "bytes": 2106
+      "sha256": "85df38a9c8524b4d7b99e8ff749678f9d45c7d8e06208baac5eae0e86d90c1c3",
+      "bytes": 3720
     },
     {
       "path": "src/intake/static-lore-evidence.js",
-      "sha256": "156150316e391d794b36b8ee80fcf0c726d7f42f9b64ae33dee456120d837b98",
-      "bytes": 19403
+      "sha256": "b6ba05ad4e528a3f0e5ae0a921fcdbc2152153f09f851810607624b4ac9d4932",
+      "bytes": 20627
     },
     {
       "path": "src/intake/static-lore-extraction-service.js",
-      "sha256": "e090e25e714bd0723c2503e10402fbc0652b781872d605051fd70c11f90150a5",
-      "bytes": 123155
+      "sha256": "8eb7649008bdbfd8c7a41c0abc46790194a25f0480a1b48cf693c427a53e3747",
+      "bytes": 132867
+    },
+    {
+      "path": "src/intake/static-lore-intake-revisions.js",
+      "sha256": "69cb120ceb0826c94f541e2d6f50bbe7c827bdb1e274844a4a7126f1aad05f78",
+      "bytes": 612
     },
     {
       "path": "src/intake/static-lore-intake.js",
       "sha256": "797985390b2afa18929abef2cafcc9554b6c2daf97766143ad90eacbecf64f35",
       "bytes": 46494
+    },
+    {
+      "path": "src/intake/static-lore-model-response.js",
+      "sha256": "ae280e1712b1f244cdd4676beab84e0cf6091d388c11f610ae8bf8bb1674b406",
+      "bytes": 2430
     },
     {
       "path": "src/intake/static-lore-source-identity.js",
@@ -2866,8 +2886,13 @@
     },
     {
       "path": "src/intake/static-lore-source-units.js",
-      "sha256": "05e0a4e8be71abbfd34a92d4a8d1aca852ccf55ae17f5b2adf6052b27a630953",
-      "bytes": 6007
+      "sha256": "bdcf88f060ae84c1a2826b13b8f61c81f97c2254997b204e24214267d6985915",
+      "bytes": 6393
+    },
+    {
+      "path": "src/intake/static-lore-unit-settlement.js",
+      "sha256": "2671b8587e7bffb88631d5d71ad86a75976f4db11c91931628c4fa44cb1a2db4",
+      "bytes": 11773
     },
     {
       "path": "src/memory/bounded-memory-read.js",
@@ -2901,13 +2926,13 @@
     },
     {
       "path": "src/proxy/cli.js",
-      "sha256": "569abf179779c4167a2c01e4753f8fea519a2610a06f0a718c1a2fc79c428064",
-      "bytes": 20362
+      "sha256": "d99422bb09744521e02a1e269304428f0c17dc091a464b6d39104f34eb3d3a54",
+      "bytes": 20802
     },
     {
       "path": "src/proxy/openai-tool-provider.js",
-      "sha256": "0de26fa434f1acdb09ac8d3d965599c069c418e12d0f78af8da785ef4a846c4d",
-      "bytes": 6733
+      "sha256": "0058e99c03cbd282337bc2121c02a80e282c98068ceebddb0c4c96ff59069cb9",
+      "bytes": 11191
     },
     {
       "path": "src/proxy/production-story-source-admission.js",
@@ -2916,8 +2941,8 @@
     },
     {
       "path": "src/proxy/provider-request-compatibility.js",
-      "sha256": "ac691f660d8bdb107314335815f7315a1ad3a1494e51943ad9e83f748d76f909",
-      "bytes": 995
+      "sha256": "3c8a0cea2cbbd78c85f644174369b6c0e84e4e007d9403ef6a72cb788e5c0a0c",
+      "bytes": 1431
     },
     {
       "path": "src/proxy/provider-step-budget.js",
@@ -2926,8 +2951,8 @@
     },
     {
       "path": "src/proxy/server.js",
-      "sha256": "6fda8e7b5890089d9551881da4245879c3cd77b5078b711bbbb36c8b3e9dd2ad",
-      "bytes": 106947
+      "sha256": "3e485af2b9171783a15d16f608a52966251125cdf29fd3833325fac42a240a8d",
+      "bytes": 114385
     },
     {
       "path": "src/runtime/accepted-target-evidence.js",
@@ -2945,14 +2970,19 @@
       "bytes": 990
     },
     {
+      "path": "src/runtime/companion-teardown.js",
+      "sha256": "9a16a04c429259722aa96bb658c35643ea6a028620a8e9d8046f924cf60f04e9",
+      "bytes": 4316
+    },
+    {
       "path": "src/runtime/context-provider.js",
-      "sha256": "0cc4c2e6f5aa9970063497c6df8547686a33674c3ba479956f717e9d050ed06d",
-      "bytes": 3300
+      "sha256": "d4a9d336b9be40809871781158bbd10351e90ee44333413af27b858b96933bdd",
+      "bytes": 4111
     },
     {
       "path": "src/runtime/continuity-composer.js",
-      "sha256": "c04ce6416cc16de38d139a3f3ad81b3eda8bfe994f2708ec39b830e708fa2193",
-      "bytes": 33346
+      "sha256": "c98ecada39d43dae4ef674788a925387ed10075a866ae8e0dfe44884df037b2c",
+      "bytes": 37716
     },
     {
       "path": "src/runtime/fresh-intake-admission.js",
@@ -2961,8 +2991,8 @@
     },
     {
       "path": "src/runtime/paid-intake-source-unit-manifest.js",
-      "sha256": "8d72383000c659ba1a1abdeb70e995a1978e1b243005724d4e28ca21c0d18a39",
-      "bytes": 31694
+      "sha256": "abe2d77ec36409afcda82745d32eefa1941ae1e0dc17935371a548176583d1de",
+      "bytes": 34694
     },
     {
       "path": "src/runtime/runtime-build-identity.js",
@@ -2971,28 +3001,28 @@
     },
     {
       "path": "src/runtime/runtime-world-integrity.js",
-      "sha256": "0e528d5e1df56cb9707e760a1c475d1869d10a24c1c394999c6653ab61f62f72",
-      "bytes": 2217
+      "sha256": "455ab246f7e4d9920bd0745ba8baa468f4d1e0130b5b7d4f0052de4a4bbf8b8f",
+      "bytes": 2405
     },
     {
       "path": "src/runtime/source-coverage-gate.js",
-      "sha256": "6c066ecdef9d494db1901e7a9cfcd97d3ae97474f6f008c25ec7921c0818d724",
-      "bytes": 35977
+      "sha256": "6fe7eeecb0d6ba419949de48d577a3155fdf4912461ff4de16a0e128ebeb36b0",
+      "bytes": 38012
     },
     {
       "path": "src/runtime/source-coverage-registry.js",
-      "sha256": "b0a1be86b6bb0e5e243c2a3fd9f1c22d631ccde7bb30ff4c82beabbde5e41d6a",
-      "bytes": 49112
+      "sha256": "092681341aa9a814639d67914a4252d21a9a4eaf499817599096e3642fc0fd19",
+      "bytes": 51229
     },
     {
       "path": "src/runtime/source-coverage-runtime.js",
-      "sha256": "46678aac42e9d20b618ffd7a6d4536fb6f752cf5f5366884729d16f6d56e13c5",
-      "bytes": 1259
+      "sha256": "23b4f02c32ca47e1e61c0d33e05685bbb68250c6fdcdc6cd7c0d14c9e9035c3f",
+      "bytes": 1346
     },
     {
       "path": "src/runtime/source-removal-grants.js",
-      "sha256": "8f327242a890cb734ec9e49d366dca5cc85edb5ad49012e0524e22dc46c96680",
-      "bytes": 32533
+      "sha256": "b40b42072a011add56b7373a810c480e785340279b3822b80c4009a2c5fa6f6b",
+      "bytes": 35530
     },
     {
       "path": "src/runtime/story-source-admission-runtime.js",
@@ -3006,8 +3036,8 @@
     },
     {
       "path": "src/runtime/story-source-host-adapter.js",
-      "sha256": "4a1d34c17865c0ddd00fbe0c2b8f402b6c819a9f59c227d78224ce87b3a3bea5",
-      "bytes": 32212
+      "sha256": "4d293cf2e5c79168f00dceec4db2a36e6ccfef2e864c75622e57938910a71203",
+      "bytes": 37273
     },
     {
       "path": "src/storage/chat-save-store.js",

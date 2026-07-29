@@ -8,17 +8,31 @@ function utf8Bytes(value) {
   return Buffer.byteLength(String(value), 'utf8');
 }
 
+function preferredTextBoundary(value) {
+  for (let index = value.length - 1; index >= 0; index -= 1) {
+    if (/[\n。！？!?；;]/u.test(value[index])) {
+      return index + 1;
+    }
+  }
+  return 0;
+}
+
 function splitOversizedText(value, maxBytes) {
   const characters = [...value];
   const chunks = [];
   let current = '';
   for (const character of characters) {
-    if (current && utf8Bytes(current + character) > maxBytes) {
-      chunks.push(current);
-      current = character;
-    } else {
-      current += character;
+    while (current && utf8Bytes(current + character) > maxBytes) {
+      const boundary = preferredTextBoundary(current);
+      if (boundary > 0) {
+        chunks.push(current.slice(0, boundary));
+        current = current.slice(boundary);
+      } else {
+        chunks.push(current);
+        current = '';
+      }
     }
+    current += character;
   }
   if (current) chunks.push(current);
   return chunks;

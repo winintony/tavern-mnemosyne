@@ -24,6 +24,8 @@ export function createProvisioningOrchestrator({
     clearSavedDirectoryHandle = async () => {},
     controlClient,
     loadBrowserFolderInput,
+    loadExpectedRuntimeBuildId = null,
+    validateReadyLease = async () => {},
     provisionBrowserFolder = provisionBrowserFolderDefault,
     now,
     randomUUID,
@@ -41,15 +43,69 @@ export function createProvisioningOrchestrator({
             'ProvisioningOrchestrator requires BrowserFolder inputs.',
         );
     }
+    if (typeof validateReadyLease !== 'function') {
+        throw new TypeError(
+            'ProvisioningOrchestrator ready-lease validator is invalid.',
+        );
+    }
+
+    // The extension version is not a usable trigger: several deployments in a
+    // row shipped as 0.2.7, so anything keyed on it silently kept the old
+    // runtime. The installed runtime build id is a content fingerprint, and a
+    // healthy runtime that does not match the one this extension ships with
+    // has to be reinstalled rather than settled for.
+    async function expectedRuntimeBuildId() {
+        if (typeof loadExpectedRuntimeBuildId !== 'function') return null;
+        let expected;
+        try {
+            expected = await loadExpectedRuntimeBuildId();
+        } catch (error) {
+            throw orchestratorError(
+                'browser_folder_runtime_fingerprint_unavailable',
+                'The shipped Mnemosyne runtime fingerprint is unavailable.',
+                error,
+            );
+        }
+        if (typeof expected !== 'string' || !expected) {
+            throw orchestratorError(
+                'browser_folder_runtime_fingerprint_unavailable',
+                'The shipped Mnemosyne runtime fingerprint is invalid.',
+            );
+        }
+        return expected;
+    }
 
     async function inspect() {
         try {
             const lease = await controlClient.resolveRootTransport();
+            const expected = await expectedRuntimeBuildId();
+            const adapter = lease.adapter_id === 'bridge'
+                ? 'server'
+                : 'existing-loopback';
+            if (expected && lease.runtime_build_id !== expected) {
+                const eligibility = browserFolderEligibility({
+                    pageUrl,
+                    secureContext,
+                    showDirectoryPicker,
+                });
+                return Object.freeze({
+                    status: 'stale',
+                    adapter: eligibility.applicable
+                        ? 'browser-folder'
+                        : adapter,
+                    lease,
+                    restart_required: true,
+                    installed_runtime_build_id: lease.runtime_build_id ?? null,
+                    expected_runtime_build_id: expected,
+                    ...(eligibility.applicable
+                        ? {}
+                        : { reason_code: eligibility.reason_code }),
+                });
+            }
+            await validateReadyLease(lease);
             return Object.freeze({
                 status: 'ready',
-                adapter: lease.adapter_id === 'bridge'
-                    ? 'server'
-                    : 'existing-loopback',
+                adapter,
                 lease,
                 restart_required: false,
             });
@@ -179,6 +235,8 @@ export function createProvisioningOrchestrator({
         let receipt;
         try {
             const input = await loadBrowserFolderInput({ rootHandle });
+            const reconciled = await inspect();
+            if (reconciled.status === 'ready') return reconciled;
             receipt = await provisionBrowserFolder({
                 rootHandle,
                 ...input,

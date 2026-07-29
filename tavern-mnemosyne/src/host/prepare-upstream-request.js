@@ -9,6 +9,7 @@ import {
   validateContinuityPayload,
 } from '../contracts/continuity-payload.js';
 import { MnemosyneRequestError } from '../contracts/errors.js';
+import { censusMark } from '../inspection/gate-census.js';
 import {
   buildRuntimeContract,
   RUNTIME_CONTRACT_SCHEMA,
@@ -959,6 +960,9 @@ export async function prepareUpstreamRequest(
     measureContinuityPayloadTokens,
   } = {},
 ) {
+  censusMark('UPSTREAM_PROMPT_FIDELITY', 'enter', {
+    runId: requestBody?.[TRACE_KEY]?.run_id ?? null,
+  });
   if (!requestBody || typeof requestBody !== 'object' || Array.isArray(requestBody)) {
     fail('request_body_invalid', 'Chat completion request body must be an object.');
   }
@@ -1214,6 +1218,7 @@ export async function prepareUpstreamRequest(
       })
     : null;
 
+  censusMark('UPSTREAM_PROMPT_FIDELITY', 'passed', { runId: trace?.run_id ?? null });
   return {
     body,
     promptSpine: {

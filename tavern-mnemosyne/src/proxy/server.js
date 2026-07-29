@@ -12,6 +12,7 @@ import { Agent, fetch as undiciFetch } from 'undici';
 
 import { MnemosyneRequestError } from '../contracts/errors.js';
 import { canonicalJson, sha256 } from '../contracts/hash.js';
+import { censusMark } from '../inspection/gate-census.js';
 import {
   operationRegistryCanonicalJson,
 } from '../control/control-operation-registry.js';
@@ -463,6 +464,17 @@ function parseBufferedModelResponse(responseText, contentType) {
 
 function createErrorBody(error, runId = null) {
   const known = error instanceof MnemosyneRequestError;
+  censusMark('REQUEST_TERMINAL', 'collapsed', {
+    runId,
+    reasonCode: known ? error.reasonCode : 'internal_error',
+    stage: known ? 'known' : 'collapsed',
+    // The raw error's own reasonCode, if any, even when `known` is false:
+    // some non-MRE error types/factories in this codebase still carry a
+    // reasonCode, and the existing onAudit request_blocked line reports
+    // that value rather than 'internal_error'. Without this, analysis would
+    // misread the legitimate divergence as a census pipeline bug (P1-6).
+    originalReasonCode: error?.reasonCode ?? null,
+  });
   return {
     error: {
       type: known ? 'mnemosyne_request_error' : 'mnemosyne_internal_error',
@@ -740,6 +752,101 @@ function assertExactRunActivityRequest(body) {
       'Run Activity accepts only chat_id and optional limit.',
     );
   }
+}
+
+function normalizeLiveRunActivity(store) {
+  if (store === undefined || store === null) return null;
+  if (typeof store.snapshot !== 'function') {
+    throw new Error('liveRunActivity must implement snapshot.');
+  }
+  return store;
+}
+
+function assertExactLiveRunActivityRequest(body) {
+  if (
+    !body
+    || typeof body !== 'object'
+    || Array.isArray(body)
+    || Object.getPrototypeOf(body) !== Object.prototype
+    || Object.keys(body).length !== 1
+    || !Object.hasOwn(body, 'chatId')
+    || !(typeof body.chatId === 'string' || body.chatId === null)
+  ) {
+    throw new MnemosyneRequestError(
+      'run_activity_input_invalid',
+      'Live Run Activity accepts only chatId.',
+    );
+  }
+}
+
+const LIVE_RUN_STATES = new Set([
+  'idle',
+  'running',
+  'completed',
+  'failed',
+  'aborted',
+]);
+
+function safeLiveNumber(value) {
+  return Number.isFinite(value) ? value : 0;
+}
+
+function safeLiveNullableString(value) {
+  return typeof value === 'string' && value ? value : null;
+}
+
+/**
+ * Explicit whitelist copy of a live run snapshot. Never spread the store
+ * value into the response: the DTO must be provably free of journal text,
+ * tool arguments, memory bodies and generated prose.
+ */
+function liveRunDto(run, maxEvents, { includeEvents = true } = {}) {
+  if (!run || typeof run !== 'object') return null;
+  const events = (includeEvents && Array.isArray(run.events))
+    ? run.events.slice(-maxEvents)
+    : [];
+  return {
+    runId: safeLiveNullableString(run.runId) ?? '',
+    attemptId: safeLiveNullableString(run.attemptId) ?? '',
+    chatId: safeLiveNullableString(run.chatId),
+    startedAt: safeLiveNumber(run.startedAt),
+    currentStage: safeLiveNullableString(run.currentStage) ?? 'starting',
+    stageStartedAt: safeLiveNumber(run.stageStartedAt),
+    step: safeLiveNumber(run.step),
+    counts: {
+      searchHits: safeLiveNumber(run.counts?.searchHits),
+      readItems: safeLiveNumber(run.counts?.readItems),
+      writtenItems: safeLiveNumber(run.counts?.writtenItems),
+    },
+    events: events.map(entry => ({
+      seq: safeLiveNumber(entry?.seq),
+      at: safeLiveNumber(entry?.at),
+      type: safeLiveNullableString(entry?.type) ?? 'unknown',
+      tool: safeLiveNullableString(entry?.tool),
+      step: Number.isFinite(entry?.step) ? entry.step : null,
+      code: safeLiveNullableString(entry?.code),
+    })),
+    errorCode: safeLiveNullableString(run.errorCode),
+  };
+}
+
+function liveRunActivityResponse(snapshot, maxEvents) {
+  const state = LIVE_RUN_STATES.has(snapshot?.state)
+    ? snapshot.state
+    : 'idle';
+  const run = state === 'idle'
+    ? null
+    : liveRunDto(snapshot?.run, maxEvents);
+  return {
+    state: run === null ? 'idle' : state,
+    revision: safeLiveNumber(snapshot?.revision),
+    run,
+    // The float only reads stale-snapshot identity and counts off the
+    // previous run, so its timeline is never serialized over the bridge.
+    previous: liveRunDto(snapshot?.previous, maxEvents, {
+      includeEvents: false,
+    }),
+  };
 }
 
 function normalizeRootRunAcceptanceGuard(guard) {
@@ -1059,6 +1166,10 @@ function consumeRootRunAcceptanceGuard(
 ) {
   if (!acceptanceGuard) return;
 
+  censusMark('ROOT_ACCEPTANCE_KERNEL_PREFETCH', 'enter', {
+    runId: prepared?.report?.run_id ?? null,
+    stage: 'acceptance_guard',
+  });
   const claims = acceptanceGuard.claims;
   const scope = rootRunScope(prepared);
   const binding = prepared.hostHistoryBinding;
@@ -1190,6 +1301,10 @@ function consumeRootRunAcceptanceGuard(
     runId: prepared.report.run_id,
     promptSpineHash: prepared.promptSpine.hash,
   });
+  censusMark('ROOT_ACCEPTANCE_KERNEL_PREFETCH', 'passed', {
+    runId: prepared?.report?.run_id ?? null,
+    stage: 'acceptance_guard',
+  });
 }
 
 function writeRootTurnCompletion(response, outcome, { stream }) {
@@ -1268,6 +1383,7 @@ export function createMnemosyneProxy({
   continuityEvaluationProgram = null,
   userVisibleRunActivity = null,
   dormantThreadInspection = null,
+  liveRunActivity = null,
   intakeBodyTimeoutMs,
   intakeHeadersTimeoutMs,
   intakeOverallTimeoutMs,
@@ -1341,6 +1457,12 @@ export function createMnemosyneProxy({
     normalizeUserVisibleRunActivity(userVisibleRunActivity);
   const dormantThreads =
     normalizeUserVisibleRunActivity(dormantThreadInspection);
+  const liveRuns = normalizeLiveRunActivity(liveRunActivity);
+  const liveRunMaxEvents = Number.isSafeInteger(
+    liveRuns?.max_events_per_attempt,
+  )
+    ? liveRuns.max_events_per_attempt
+    : 200;
   const capabilities = createCapabilityRegistry(capabilityAdapters);
   const verifiedMainHostBinding = normalizeMainHostBinding(mainHostBinding);
   const verifiedRootRunAuditBinding =
@@ -1733,6 +1855,24 @@ export function createMnemosyneProxy({
 
       if (
         request.method === 'POST'
+        && requestUrl.pathname === '/v1/mnemosyne/activity/live'
+      ) {
+        assertContextAuthorization(request, contextAccessToken);
+        if (!liveRuns) {
+          throw userVisibleRunActivityUnavailable();
+        }
+        requestBody = await readJsonBody(request, maxBodyBytes);
+        assertExactLiveRunActivityRequest(requestBody);
+        // Polled at sub-second cadence by the run status float; deliberately
+        // not audited so the audit stream stays a record of real actions.
+        return json(response, 200, liveRunActivityResponse(
+          liveRuns.snapshot({ chatId: requestBody.chatId }),
+          liveRunMaxEvents,
+        ));
+      }
+
+      if (
+        request.method === 'POST'
         && requestUrl.pathname
           === '/v1/mnemosyne/activity/dormant-threads'
       ) {
@@ -1969,6 +2109,9 @@ export function createMnemosyneProxy({
         request.method === 'POST'
         && requestUrl.pathname === '/v1/mnemosyne/source-removal-grants'
       ) {
+        censusMark('SOURCE_REMOVAL_GRANT_ISSUANCE', 'enter', {
+          runId: requestBody?.run_id ?? null,
+        });
         assertContextAuthorization(request, contextAccessToken);
         if (!sourceRemovalGrantService) {
           throw new MnemosyneRequestError(
@@ -1983,6 +2126,9 @@ export function createMnemosyneProxy({
           runScope: requestBody.run_scope,
           sources: requestBody.sources,
           promptFingerprints: requestBody.prompt_fingerprints,
+        });
+        censusMark('SOURCE_REMOVAL_GRANT_ISSUANCE', 'passed', {
+          runId: requestBody?.run_id ?? null,
         });
         return json(response, 200, result);
       }
@@ -2455,6 +2601,13 @@ export function createMnemosyneProxy({
           requestId,
           requestBody: intakeRequestBody,
         });
+        if (
+          typeof staticLoreExtractionService
+            .assertPreparedRequestDispatchable === 'function'
+        ) {
+          await staticLoreExtractionService
+            .assertPreparedRequestDispatchable({ requestId });
+        }
         const upstreamBody = upstreamModel
           ? {
             ...verifiedBody,
@@ -2770,6 +2923,9 @@ export function createMnemosyneProxy({
         });
       }
 
+      censusMark('PROXY_REQUEST_ENVELOPE', 'enter', {
+        runId: requestBody?.mnemosyne_prompt_trace?.run_id ?? null,
+      });
       assertLocalAuthorization(request, proxyToken);
       if (!upstreamBaseUrl) {
         throw new MnemosyneRequestError(
@@ -2783,6 +2939,12 @@ export function createMnemosyneProxy({
         requestBody.mnemosyne_transport_binding;
       const suppliedTransportLease =
         requestBody.mnemosyne_transport_lease;
+      censusMark('PROXY_REQUEST_ENVELOPE', 'passed', {
+        runId: requestBody?.mnemosyne_prompt_trace?.run_id ?? null,
+      });
+      censusMark('TRANSPORT_LEASE_INJECTION', 'enter', {
+        runId: requestBody?.mnemosyne_prompt_trace?.run_id ?? null,
+      });
       const transportBinding = (
         requireGenerationTransportBinding
         || suppliedTransportBinding !== undefined
@@ -2805,15 +2967,24 @@ export function createMnemosyneProxy({
             transportBinding,
           )
         : null;
+      censusMark('TRANSPORT_LEASE_INJECTION', 'passed', {
+        runId: requestBody?.mnemosyne_prompt_trace?.run_id ?? null,
+      });
       const preparedRequestBody = {
         ...requestBody,
       };
       delete preparedRequestBody.mnemosyne_transport_binding;
       delete preparedRequestBody.mnemosyne_transport_lease;
+      censusMark('UPSTREAM_PROMPT_FIDELITY', 'enter', {
+        runId: requestBody?.mnemosyne_prompt_trace?.run_id ?? null,
+      });
       const prepared = await prepareUpstreamRequest(preparedRequestBody, {
         verifyRemovalAuthorization: verifySourceRemoval,
         auditExcludedPhrases,
         measureContinuityPayloadTokens: countOpenAiTokens,
+      });
+      censusMark('UPSTREAM_PROMPT_FIDELITY', 'passed', {
+        runId: prepared?.report?.run_id ?? null,
       });
       assertProviderBudgetMatchesPolicy({
         providerBudget: prepared.providerBudget,
@@ -2870,6 +3041,9 @@ export function createMnemosyneProxy({
           body: constrainedPreparedBody,
         },
       });
+      censusMark('STORY_SOURCE_ADMISSION', 'enter', {
+        runId: requestBody?.mnemosyne_prompt_trace?.run_id ?? null,
+      });
       const admissionPreview = await storySourceAdmission.prepareOnly(
         hostInput,
       );
@@ -2879,6 +3053,9 @@ export function createMnemosyneProxy({
           receipt: admissionPreview.receipt,
         }),
       );
+      censusMark('STORY_SOURCE_ADMISSION', 'passed', {
+        runId: requestBody?.mnemosyne_prompt_trace?.run_id ?? null,
+      });
       consumeRootRunAcceptanceGuard(
         prepared,
         verifiedRootRunAcceptanceGuard,
@@ -3127,6 +3304,14 @@ export function createMnemosyneProxy({
       )
         ? error.details
         : null;
+      const storySourceMappingMismatch = (
+        error instanceof MnemosyneRequestError
+        && error.reasonCode === 'story_source_host_mapping_drift'
+        && error.details
+        && typeof error.details === 'object'
+      )
+        ? error.details
+        : null;
       onAudit({
         event: 'request_blocked',
         run_id: runId,
@@ -3165,6 +3350,24 @@ export function createMnemosyneProxy({
           providerTraceMismatch
             ? providerTraceMismatch.expected_prompt_message_hash
               !== providerTraceMismatch.actual_prompt_message_hash
+            : undefined,
+        story_source_stage:
+          typeof storySourceMappingMismatch?.stage === 'string'
+          && /^[a-z][a-z0-9_]{2,63}$/.test(
+            storySourceMappingMismatch.stage,
+          )
+            ? storySourceMappingMismatch.stage
+            : undefined,
+        story_source_identifier:
+          typeof storySourceMappingMismatch?.identifier === 'string'
+          && /^[A-Za-z0-9_.:-]{1,128}$/.test(
+            storySourceMappingMismatch.identifier,
+          )
+            ? storySourceMappingMismatch.identifier
+            : undefined,
+        story_source_provider_index:
+          Number.isInteger(storySourceMappingMismatch?.provider_index)
+            ? storySourceMappingMismatch.provider_index
             : undefined,
         host_reason_code:
           error instanceof MnemosyneRequestError

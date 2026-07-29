@@ -354,3 +354,186 @@
 #tavern_mnemosyne_settings .mnemosyne-activity-actions [hidden] {
   display: none;
 }
+
+/* Floating live-run status capsule, above the chat input area */
+
+.mnemosyne-run-status-float {
+  bottom: 130px;
+  display: grid;
+  justify-items: end;
+  position: fixed;
+  right: 12px;
+  transition: opacity 180ms ease, transform 180ms ease;
+  z-index: 2500;
+}
+
+.mnemosyne-run-status-float[hidden] {
+  display: none;
+}
+
+.mnemosyne-run-status-float--fading {
+  opacity: 0;
+  transform: translateY(6px);
+}
+
+.mnemosyne-run-status-pill {
+  align-items: center;
+  backdrop-filter: blur(6px);
+  background: var(--SmartThemeBlurTintColor, rgb(0 0 0 / 70%));
+  border: 1px solid rgb(255 255 255 / 15%);
+  border-radius: 999px;
+  color: var(--SmartThemeBodyColor, #ddd);
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 0.85em;
+  gap: 6px;
+  opacity: 0.9;
+  padding: 5px 12px;
+  transition: opacity 180ms ease;
+}
+
+.mnemosyne-run-status-pill:hover {
+  opacity: 1;
+}
+
+.mnemosyne-run-status-dot {
+  border-radius: 50%;
+  display: inline-block;
+  height: 8px;
+  width: 8px;
+}
+
+.mnemosyne-run-status-float[data-kind="preparing"] .mnemosyne-run-status-dot,
+.mnemosyne-run-status-float[data-kind="running"] .mnemosyne-run-status-dot {
+  animation: mnemosyne-run-status-breathe 1.6s ease-in-out infinite;
+  background: var(--SmartThemeQuoteColor, #7aa2f7);
+}
+
+.mnemosyne-run-status-float[data-kind="degraded"] .mnemosyne-run-status-dot {
+  background: var(--SmartThemeQuoteColor, #7aa2f7);
+  opacity: 0.6;
+}
+
+.mnemosyne-run-status-float[data-kind="aborting"] .mnemosyne-run-status-dot {
+  animation: mnemosyne-run-status-breathe 1.6s ease-in-out infinite;
+  background: #e0b23c;
+}
+
+.mnemosyne-run-status-float[data-kind="completed"] .mnemosyne-run-status-dot {
+  background: #59c26e;
+}
+
+.mnemosyne-run-status-float[data-kind="failed"] .mnemosyne-run-status-dot {
+  background: #e0554f;
+}
+
+.mnemosyne-run-status-float[data-kind="aborted"] .mnemosyne-run-status-dot {
+  background: rgb(255 255 255 / 40%);
+}
+
+@keyframes mnemosyne-run-status-breathe {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+
+.mnemosyne-run-status-text {
+  overflow-wrap: anywhere;
+}
+
+.mnemosyne-run-status-timer {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.75;
+}
+
+.mnemosyne-run-status-float[data-kind="failed"] .mnemosyne-run-status-text {
+  color: #e0554f;
+}
+
+.mnemosyne-run-status-close {
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  font-size: 1.1em;
+  line-height: 1;
+  opacity: 0.7;
+  padding: 0 2px;
+}
+
+.mnemosyne-run-status-close:hover {
+  opacity: 1;
+}
+
+.mnemosyne-run-status-card {
+  backdrop-filter: blur(6px);
+  background: var(--SmartThemeBlurTintColor, rgb(0 0 0 / 85%));
+  border: 1px solid rgb(255 255 255 / 15%);
+  border-radius: 10px;
+  margin-top: 6px;
+  padding: 8px 10px;
+  transition: opacity 180ms ease, transform 180ms ease;
+  width: 260px;
+}
+
+.mnemosyne-run-status-card[hidden] {
+  display: none;
+}
+
+.mnemosyne-run-status-timeline {
+  display: grid;
+  gap: 4px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.mnemosyne-run-status-step {
+  align-items: baseline;
+  color: var(--SmartThemeBodyColor, #ddd);
+  display: grid;
+  gap: 6px;
+  grid-template-columns: 14px minmax(0, 1fr) auto;
+  font-size: 0.85em;
+  opacity: 0.75;
+}
+
+.mnemosyne-run-status-step[data-status="active"] {
+  opacity: 1;
+}
+
+.mnemosyne-run-status-step[data-status="failed"] {
+  color: #e0554f;
+  opacity: 1;
+}
+
+.mnemosyne-run-status-step[data-status="rejected"] {
+  color: #e0b23c;
+  opacity: 1;
+}
+
+.mnemosyne-run-status-step-icon {
+  text-align: center;
+}
+
+.mnemosyne-run-status-step[data-status="active"] .mnemosyne-run-status-step-icon::after {
+  animation: mnemosyne-run-status-spin 0.9s linear infinite;
+  border: 2px solid rgb(255 255 255 / 25%);
+  border-radius: 50%;
+  border-top-color: var(--SmartThemeQuoteColor, #7aa2f7);
+  content: "";
+  display: inline-block;
+  height: 9px;
+  width: 9px;
+}
+
+@keyframes mnemosyne-run-status-spin {
+  to { transform: rotate(360deg); }
+}
+
+.mnemosyne-run-status-step-label {
+  overflow-wrap: anywhere;
+}
+
+.mnemosyne-run-status-step-duration {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.75;
+}

@@ -1,5 +1,7 @@
 import {
   canonicalJson,
+  hashMessage,
+  hashNormalizedMessage,
   hashPromptSpine,
   sha256,
 } from '../contracts/hash.js';
@@ -7,6 +9,7 @@ import {
   sourceLabelForPromptIdentifier,
 } from '../contracts/author-source-route.js';
 import { MnemosyneRequestError } from '../contracts/errors.js';
+import { censusMark } from '../inspection/gate-census.js';
 
 const INPUT_SCHEMA =
   'mnemosyne.story-source-admission-input.v1';
@@ -66,6 +69,13 @@ const PROMPT_FIDELITY_REPORT_KEYS = Object.freeze([
   'source_decisions',
   'source_removal_grants',
   'verified_message_count',
+]);
+const PROVIDER_MESSAGE_FINGERPRINT_KEYS = Object.freeze([
+  'content_hash',
+  'message_hash',
+  'name',
+  'provider_index',
+  'role',
 ]);
 const SOURCE_REMOVAL_GRANT_KEYS = Object.freeze([
   'certificate_ids',
@@ -788,7 +798,132 @@ function assertTraceComponentMapping(entry, trace, component) {
     fail(
       'story_source_host_mapping_drift',
       'Provider trace no longer carries the exact host provenance.',
-      { identifier: entry.identifier },
+      {
+        stage: 'trace_component_mapping',
+        identifier: entry.identifier,
+        provider_index: entry.provider_index,
+      },
+    );
+  }
+}
+
+function assertMappedEntryContent(entry, requestBody) {
+  const message = requestBody.messages?.[entry.provider_index];
+  const content = message?.content;
+  const start = entry.provider_content_start;
+  const end = entry.provider_content_end;
+  if (
+    !Number.isInteger(entry.provider_index)
+    || typeof content !== 'string'
+    || !Number.isInteger(start)
+    || !Number.isInteger(end)
+    || start < 0
+    || end <= start
+    || end > content.length
+    || hashNormalizedMessage({
+      role: entry.role,
+      name: entry.name ?? null,
+      content: content.slice(start, end),
+    }) !== entry.prompt_message_hash
+  ) {
+    fail(
+      'story_source_host_mapping_drift',
+      'Raw host source content no longer matches its exact provider coordinate.',
+      {
+        stage: 'mapped_source_content',
+        identifier: entry.identifier,
+        provider_index: entry.provider_index,
+      },
+    );
+  }
+}
+
+function assertPreparedProviderMessages({
+  requestBody,
+  prepared,
+  removedEntries,
+}) {
+  const removalsByProvider = new Map();
+  for (const removed of removedEntries) {
+    const spans = removalsByProvider.get(removed.index) ?? [];
+    spans.push(removed);
+    removalsByProvider.set(removed.index, spans);
+  }
+  const expectedMessages = [];
+  for (
+    let index = 0;
+    index < requestBody.messages.length;
+    index += 1
+  ) {
+    const message = structuredClone(requestBody.messages[index]);
+    const spans = (removalsByProvider.get(index) ?? [])
+      .sort((left, right) => right.start - left.start);
+    let previousStart = Number.POSITIVE_INFINITY;
+    for (const span of spans) {
+      if (
+        typeof message.content !== 'string'
+        || span.end > previousStart
+        || span.start < 0
+        || span.end <= span.start
+        || span.end > message.content.length
+      ) {
+        fail(
+          'story_source_host_mapping_drift',
+          'Prompt fidelity removal coordinates cannot reconstruct the prepared request.',
+          {
+            stage: 'removal_coordinates',
+            provider_index: index,
+          },
+        );
+      }
+      previousStart = span.start;
+      message.content = (
+        message.content.slice(0, span.start)
+        + message.content.slice(span.end)
+      );
+    }
+    if (spans.length > 0 && String(message.content).trim() === '') {
+      continue;
+    }
+    expectedMessages.push(message);
+  }
+  if (
+    canonicalJson(expectedMessages)
+      !== canonicalJson(prepared.body.messages)
+  ) {
+    fail(
+      'story_source_host_mapping_drift',
+      'Prepared provider messages do not preserve the exact retained source coordinates.',
+      { stage: 'prepared_provider_messages' },
+    );
+  }
+  const expectedFingerprints = expectedMessages.map(
+    (message, providerIndex) => ({
+      provider_index: providerIndex,
+      role: message?.role ?? null,
+      name: message?.name ?? null,
+      content_hash: sha256(
+        typeof message?.content === 'string'
+          ? message.content
+          : canonicalJson(message?.content ?? null),
+      ),
+      message_hash: hashMessage(message),
+    }),
+  );
+  if (
+    prepared.report.provider_message_fingerprints.some(
+      fingerprint => !hasExactKeys(
+        fingerprint,
+        PROVIDER_MESSAGE_FINGERPRINT_KEYS,
+      ),
+    )
+    || canonicalJson(prepared.report.provider_message_fingerprints)
+      !== canonicalJson(expectedFingerprints)
+  ) {
+    fail(
+      'story_source_host_mapping_drift',
+      'Prompt fidelity provider fingerprints do not match the retained request.',
+      { stage: 'provider_fingerprints' },
     );
   }
 }
@@ -810,7 +945,7 @@ function sourceBindings({
   const matchedReportedGrants = new Set();
   const worldInfoSelectors = new Set();
   const bindings = [];
-  const survivors = [];
+  const removedRawEntries = [];
 
   for (const entry of rawEntries) {
     const expectedLabel = sourceLabelForPromptIdentifier(
@@ -836,7 +971,11 @@ function sourceBindings({
       fail(
         'story_source_host_mapping_drift',
         'Raw host source trace identity changed after preparation.',
-        { identifier: entry.identifier ?? null },
+        {
+          stage: 'raw_source_identity',
+          identifier: entry.identifier ?? null,
+          provider_index: entry.provider_index,
+        },
       );
     }
     const component = validateComponentProvenance(
@@ -844,6 +983,7 @@ function sourceBindings({
       entry.identifier,
     );
     assertTraceComponentMapping(entry, trace, component);
+    assertMappedEntryContent(entry, requestBody);
 
     const matchingDecisions = decisions
       .map((decision, index) => ({ decision, index }))
@@ -879,16 +1019,29 @@ function sourceBindings({
     }));
     const grantId =
       entry.removal_authorization?.grant_id ?? null;
-    if (decision.decision !== 'removed') {
-      survivors.push({
-        identifier: entry.identifier,
-        source_label: entry.source_label,
-        prompt_message_hash: entry.prompt_message_hash,
-        reason_code:
-          decision.reason_code ?? 'host_source_retained',
-      });
+    if (decision.decision === 'retained') {
+      if (
+        entry.retention_policy !== 'retain'
+        || entry.removal_authorization !== null
+        || entry.removal_authorization_issue !== null
+        || decision.requested_policy !== 'retain'
+        || decision.grant_id !== null
+        || decision.reason_code !== 'host_source_retained'
+        || removedMatches.length !== 0
+      ) {
+        fail(
+          'story_source_host_mapping_drift',
+          'Retained host source evidence no longer matches its in-place policy.',
+          {
+            stage: 'retained_source_policy',
+            identifier: entry.identifier,
+            provider_index: entry.provider_index,
+          },
+        );
+      }
     } else if (
-      decision.requested_policy
+      decision.decision !== 'removed'
+      || decision.requested_policy
         !== 'remove_absorbed_author_source'
       || decision.grant_id !== grantId
       || typeof grantId !== 'string'
@@ -900,7 +1053,11 @@ function sourceBindings({
       fail(
         'story_source_host_mapping_drift',
         'Removed host source evidence no longer matches its grant.',
-        { identifier: entry.identifier },
+        {
+          stage: 'removed_source_grant',
+          identifier: entry.identifier,
+          provider_index: entry.provider_index,
+        },
       );
     } else {
       validateSourceRemovalGrant(
@@ -927,7 +1084,11 @@ function sourceBindings({
         fail(
           'story_source_host_mapping_drift',
           'Prompt fidelity did not preserve one exact source removal grant.',
-          { identifier: entry.identifier },
+          {
+            stage: 'reported_removal_grant',
+            identifier: entry.identifier,
+            provider_index: entry.provider_index,
+          },
         );
       }
       matchedReportedGrants.add(
@@ -968,10 +1129,22 @@ function sourceBindings({
         fail(
           'story_source_host_mapping_drift',
           'Removed host source span no longer matches its trace.',
-          { identifier: entry.identifier },
+          {
+            stage: 'removed_source_span',
+            identifier: entry.identifier,
+            provider_index: entry.provider_index,
+          },
         );
       }
       matchedRemoved.add(removedIndex);
+      removedRawEntries.push(entry);
+      bindings.push({
+        identifier: entry.identifier,
+        source_label: entry.source_label,
+        prompt_message_hash: entry.prompt_message_hash,
+        grant_id: grantId,
+        component_provenance: component,
+      });
     }
 
     for (const selector of component.source_selectors) {
@@ -991,15 +1164,6 @@ function sourceBindings({
       }
       worldInfoSelectors.add(selectorIdentity);
     }
-    bindings.push({
-      identifier: entry.identifier,
-      source_label: entry.source_label,
-      prompt_message_hash: entry.prompt_message_hash,
-      grant_id: decision.decision === 'removed'
-        ? grantId
-        : null,
-      component_provenance: component,
-    });
   }
 
   if (
@@ -1010,23 +1174,22 @@ function sourceBindings({
     fail(
       'story_source_host_mapping_drift',
       'Prompt fidelity contains an extra raw source decision or removal.',
+      { stage: 'source_decision_cardinality' },
     );
   }
-  if (survivors.length > 0) {
-    fail(
-      'story_source_raw_survivor',
-      'A retained raw host source cannot be wrapped as raw-free.',
-      { rawSurvivors: survivors },
-    );
-  }
+  assertPreparedProviderMessages({
+    requestBody,
+    prepared,
+    removedEntries,
+  });
   const sourceCoverage = validateSourceCoverage(
     trace,
-    rawEntries,
+    removedRawEntries,
     runScope,
   );
   return {
     bindings,
-    survivors,
+    survivors: [],
     sourceCoverage,
   };
 }
@@ -1035,6 +1198,9 @@ export function createStorySourceAdmissionInput({
   requestBody,
   prepared,
 } = {}) {
+  censusMark('STORY_SOURCE_HOST_ADAPTER', 'enter', {
+    runId: requestBody?.mnemosyne_prompt_trace?.run_id ?? null,
+  });
   const trace = requestBody?.mnemosyne_prompt_trace;
   assertPreparedShape(requestBody, prepared, trace);
   const runScope = deriveRunScope(prepared, trace);
@@ -1078,6 +1244,7 @@ export function createStorySourceAdmissionInput({
     writable: false,
   });
   sealedInputs.add(input);
+  censusMark('STORY_SOURCE_HOST_ADAPTER', 'passed', { runId: trace?.run_id ?? null });
   return deepFreeze(input);
 }
 

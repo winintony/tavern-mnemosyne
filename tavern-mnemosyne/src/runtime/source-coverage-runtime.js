@@ -33,6 +33,8 @@ export function createProductionSourceCoverageRuntime({
   const sourceRemovalGrantService = createSourceRemovalGrantService({
     store,
     coveragePolicy: 'strict',
+    trustedRemovalClaimSelector:
+      coverageRegistry.selectRemovalClaimIdentifiers,
     trustedCoverageVerifier:
       coverageRegistry.trustedCoverageVerifier,
     ...(now === undefined ? {} : { now }),

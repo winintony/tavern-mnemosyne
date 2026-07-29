@@ -3,6 +3,67 @@ const AUTHENTICATION_MESSAGE =
   /(?:unauthori[sz]ed|authentication|invalid\s+(?:api\s+)?key|api\s+key\s+invalid)/i;
 const REQUEST_COMPATIBILITY_STATUS_CODES = new Set([400, 404, 405, 422]);
 
+function plainObject(value) {
+  return (
+    value
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && Object.getPrototypeOf(value) === Object.prototype
+  );
+}
+
+export function bindPreparedIntakeHostRequest({
+  modelRequest,
+  requestId,
+  executionLease,
+  intakeCapability,
+  proxyBaseUrl,
+}) {
+  if (
+    !plainObject(modelRequest)
+    || typeof requestId !== 'string'
+    || !requestId
+    || !plainObject(executionLease)
+    || typeof intakeCapability !== 'string'
+    || !intakeCapability
+    || typeof proxyBaseUrl !== 'string'
+    || !proxyBaseUrl
+    || Object.hasOwn(
+      modelRequest,
+      'mnemosyne_intake_request_id',
+    )
+    || Object.hasOwn(
+      modelRequest,
+      'mnemosyne_intake_execution_lease',
+    )
+  ) {
+    throw new TypeError(
+      'Prepared Static Lore host transport binding is invalid.',
+    );
+  }
+  const transportBody = {
+    ...structuredClone(modelRequest),
+    mnemosyne_intake_request_id: requestId,
+    mnemosyne_intake_execution_lease:
+      structuredClone(executionLease),
+  };
+  return {
+    ...structuredClone(modelRequest),
+    chat_completion_source: 'custom',
+    custom_url:
+      `${proxyBaseUrl.replace(/\/+$/, '')}/v1/mnemosyne/intake`,
+    // SillyTavern reconstructs Custom OpenAI requests from a fixed set of
+    // top-level fields. The custom body is its supported lossless transport
+    // for provider-specific fields such as DeepSeek's `thinking`.
+    custom_include_body: JSON.stringify(transportBody),
+    custom_exclude_body: '',
+    custom_include_headers: JSON.stringify({
+      'x-mnemosyne-intake-capability': intakeCapability,
+    }),
+    custom_prompt_post_processing: '',
+  };
+}
+
 export function classifyIntakeModelFailure({
   responseOk,
   responseStatus,

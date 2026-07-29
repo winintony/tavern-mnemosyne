@@ -22,6 +22,19 @@ import {
   staticLoreControlTarget,
 } from '../intake/static-lore-control-units.js';
 import {
+  INTAKE_CONTRACT_REVISION,
+  SOURCE_PARTITION_REVISION,
+} from '../intake/static-lore-intake-revisions.js';
+import {
+  parseStaticLoreToolArguments,
+} from '../intake/static-lore-model-response.js';
+import {
+  rebuildStaticLoreSourceUnitLedger,
+  settleStaticLoreSourceUnits,
+  staticLoreArtifactSettlementTime,
+  terminalSourceUnitLedgerEntry,
+} from '../intake/static-lore-unit-settlement.js';
+import {
   staticLoreSnapshotHash,
 } from '../intake/static-lore-source-identity.js';
 import {
@@ -36,8 +49,12 @@ const MANIFEST_SCHEMA = 'mnemosyne.source-unit-coverage-manifest.v1';
 const SESSION_SCHEMA = 'mnemosyne.static-lore-intake-session.v1';
 const ARTIFACT_SCHEMA = 'mnemosyne.static-lore-model-artifact.v1';
 const EXTRACTION_SCHEMA = 'mnemosyne.static-lore-extraction.v1';
-const REQUIRED_CONTRACT_REVISION = 7;
-const REQUIRED_PARTITION_REVISION = 4;
+// A completed session is only interpretable by the revisions that minted it:
+// migration invalidates every superseded artifact and rebases the session onto
+// the current partition, so anything not pinned to the current revision has
+// batch boundaries this gate can no longer verify. Exact match, never a floor.
+export const REQUIRED_CONTRACT_REVISION = INTAKE_CONTRACT_REVISION;
+export const REQUIRED_PARTITION_REVISION = SOURCE_PARTITION_REVISION;
 
 function fail(reasonCode, message, details = undefined) {
   throw new MnemosyneRequestError(reasonCode, message, details);
@@ -103,23 +120,14 @@ function parseExtraction(modelResponse) {
   }
   let extraction;
   try {
-    extraction = typeof toolCalls[0].function.arguments === 'string'
-      ? JSON.parse(toolCalls[0].function.arguments)
-      : structuredClone(toolCalls[0].function.arguments);
+    extraction = parseStaticLoreToolArguments(
+      toolCalls[0].function.arguments,
+    );
   } catch (error) {
     integrityFailure(
       'A paid intake artifact contains invalid tool arguments.',
       { cause: error.message },
     );
-  }
-  if (
-    extraction
-    && typeof extraction === 'object'
-    && !Array.isArray(extraction)
-    && Object.keys(extraction).length === 1
-    && Object.hasOwn(extraction, '$PARAMETER_NAME')
-  ) {
-    extraction = extraction.$PARAMETER_NAME;
   }
   if (extraction?.schema !== EXTRACTION_SCHEMA) {
     integrityFailure('A paid intake artifact has an unsupported schema.');
@@ -324,6 +332,50 @@ function assertSessionReady(session, {
     return false;
   }
   return true;
+}
+
+function validatedSourceUnitLedger(session, expectedEntries) {
+  if (session.source_unit_ledger === undefined) {
+    return expectedEntries;
+  }
+  if (
+    !Array.isArray(session.source_unit_ledger)
+    || session.source_unit_ledger.length !== expectedEntries.length
+  ) {
+    integrityFailure(
+      'The completed intake session is missing its source-unit ledger.',
+    );
+  }
+  const actualByRef = new Map(
+    session.source_unit_ledger.map(entry => [
+      entry.source_unit_ref,
+      entry,
+    ]),
+  );
+  if (actualByRef.size !== session.source_unit_ledger.length) {
+    integrityFailure(
+      'The completed intake session has duplicate source-unit ledger entries.',
+    );
+  }
+  for (const expected of expectedEntries) {
+    const actual = actualByRef.get(expected.source_unit_ref);
+    if (
+      !terminalSourceUnitLedgerEntry(actual)
+      || canonicalJson({
+        ...actual,
+        settled_at: undefined,
+      }) !== canonicalJson({
+        ...expected,
+        settled_at: undefined,
+      })
+    ) {
+      integrityFailure(
+        'The completed intake source-unit ledger failed revalidation.',
+        { source_unit_ref: expected.source_unit_ref },
+      );
+    }
+  }
+  return session.source_unit_ledger;
 }
 
 function artifactRecordByBatch(session) {
@@ -605,6 +657,7 @@ export function createPaidIntakeSourceUnitManifestProvider({
     const evidenceSpans = [];
     const acceptedClaimsByEvidence = new Map();
     const acceptedNonStoryByEvidence = new Map();
+    const settledBatches = [];
     for (
       let batchIndex = 0;
       batchIndex < session.batches.length;
@@ -661,7 +714,13 @@ export function createPaidIntakeSourceUnitManifestProvider({
           { batch_index: batchIndex, cause: error.message },
         );
       }
-      const batchMappings = collectBatchMappings(normalized.extraction);
+      const settled = settleStaticLoreSourceUnits({
+        extraction,
+        normalizedExtraction: normalized.extraction,
+        sourceUnits: batch.units,
+        nonStoryEvidence: normalized.non_story_evidence,
+      });
+      const batchMappings = collectBatchMappings(settled.extraction);
       for (const [key, mappings] of batchMappings) {
         const existing = acceptedClaimsByEvidence.get(key) ?? new Map();
         for (const [mappingKey, mapping] of mappings) {
@@ -689,7 +748,12 @@ export function createPaidIntakeSourceUnitManifestProvider({
         }
         acceptedNonStoryByEvidence.set(key, evidence.classification);
       }
-      for (const span of resolved.spans) {
+      const acceptedSpanIds = new Set(
+        settled.accepted_evidence_span_ids,
+      );
+      for (const span of resolved.spans.filter(
+        item => acceptedSpanIds.has(item.evidence_id),
+      )) {
         const localControl = normalized.non_story_evidence.find(
           evidence => (
             evidence.evidence_id === span.evidence_id
@@ -724,14 +788,20 @@ export function createPaidIntakeSourceUnitManifestProvider({
       }
       const merged = mergeStaticLoreBatch({
         aggregate,
-        extraction: normalized.extraction,
+        extraction: settled.extraction,
         allowedSourceRefs: batch.units.map(unit => unit.ref),
       });
       aggregate = merged.aggregate;
       warnings.push(
         ...normalized.warnings,
+        ...settled.warnings,
         ...merged.warnings,
       );
+      settledBatches.push({
+        batch_index: batchIndex,
+        settlements: settled.settlements,
+        settled_at: staticLoreArtifactSettlementTime(session, record),
+      });
     }
     if (
       canonicalJson(aggregate) !== canonicalJson(session.aggregate)
@@ -741,6 +811,13 @@ export function createPaidIntakeSourceUnitManifestProvider({
         'The paid artifacts no longer rebuild the completed intake aggregate.',
       );
     }
+    const sourceUnitLedger = validatedSourceUnitLedger(
+      session,
+      rebuildStaticLoreSourceUnitLedger({
+        batches: session.batches,
+        settledBatches,
+      }),
+    );
 
     const opened = await store.openChatForAdmin({
       chatId: request.chat_id,
@@ -777,6 +854,21 @@ export function createPaidIntakeSourceUnitManifestProvider({
     const unitEvidence = evidenceSpans.filter(
       span => span.source_ref === requestedUnit.ref,
     );
+    const requestedLedgerEntry = sourceUnitLedger.find(
+      entry => entry.source_unit_ref === requestedUnit.ref,
+    );
+    if (requestedLedgerEntry?.state === 'unresolved') {
+      return incompleteManifest({
+        request,
+        reasonCode: 'source_coverage_source_unit_evidence_missing',
+      });
+    }
+    if (requestedLedgerEntry?.state !== 'owned') {
+      return incompleteManifest({
+        request,
+        reasonCode: 'source_coverage_source_unit_not_fully_evidenced',
+      });
+    }
     if (unitEvidence.length === 0) {
       return incompleteManifest({
         request,

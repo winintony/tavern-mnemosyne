@@ -333,6 +333,54 @@ export function planHistoryInvalidationResolution(
   };
 }
 
+export async function repairPathologicalHistoryInvalidationGuard(
+  currentGuard,
+  {
+    inspection,
+    greetingMacroEquivalent,
+    settle,
+  } = {},
+) {
+  if (
+    typeof greetingMacroEquivalent !== 'boolean'
+    || typeof settle !== 'function'
+  ) {
+    throw new TypeError(
+      'Pathological history invalidation repair inputs are invalid.',
+    );
+  }
+  const guard =
+    assertHistoryInvalidationGuard(
+      currentGuard,
+    );
+  if (
+    guard.status
+      !== 'tail_regeneration_required'
+    || guard.desired_cutoff_turn_index !== 0
+    || guard.desired_host_release_length !== 0
+    || guard.applied_cutoff_turn_index !== 0
+    || guard.active_command !== null
+    || !Number.isInteger(guard.branch_epoch)
+    || greetingMacroEquivalent !== true
+    || inspection?.schema
+      !== 'mnemosyne.governed-history-inspection.v1'
+    || inspection.status !== 'ready'
+    || inspection.chat_id === ''
+    || typeof inspection.chat_id !== 'string'
+    || inspection.branch_id !== 'main'
+    || inspection.has_governed_history !== true
+    || inspection.committed_turn_count !== 0
+    || inspection.active_branch_epoch
+      !== guard.branch_epoch
+    || inspection.latest_turn_index !== null
+    || inspection.recovery_anchor != null
+  ) {
+    return false;
+  }
+  await settle([], guard.branch_epoch);
+  return true;
+}
+
 export function consumeGenerationAbortReason(state) {
   if (!state || typeof state !== 'object') {
     throw new TypeError('Generation state must be an object.');
