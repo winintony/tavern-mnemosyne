@@ -542,6 +542,7 @@ export function createUpstreamConnectionLease({
   }
 
   return Object.freeze({
+    captureSelectedProfile,
     resolveForProvisioning,
     resolveExplicitProvisioningBinding,
     restoreSelectedProfile,
