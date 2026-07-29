@@ -166,8 +166,36 @@ function outboundHeaders({
   };
 }
 
+function normalizeRuntimeBaseUrl(value) {
+  const candidate = typeof value === 'string'
+    ? value
+    : value?.runtime_base_url;
+  let normalized;
+  try {
+    normalized = new URL(candidate);
+  } catch {
+    return null;
+  }
+  if (
+    normalized.protocol !== 'http:'
+    || !['127.0.0.1', 'localhost', '::1'].includes(
+      normalized.hostname,
+    )
+    || normalized.username
+    || normalized.password
+    || normalized.pathname !== '/'
+    || normalized.search
+    || normalized.hash
+    || !normalized.port
+  ) {
+    return null;
+  }
+  return normalized.href.replace(/\/+$/, '');
+}
+
 export function createMnemosyneSillyTavernBridge({
   runtimeBaseUrl = 'http://127.0.0.1:18991',
+  resolveRuntimeTarget = null,
   contextAccessToken,
   bridgeVersion = '1',
   fetchImpl = globalThis.fetch,
@@ -183,23 +211,48 @@ export function createMnemosyneSillyTavernBridge({
   if (typeof fetchImpl !== 'function') {
     throw new Error('The bridge requires fetch.');
   }
-  const normalizedRuntimeBaseUrl = new URL(runtimeBaseUrl);
   if (
-    normalizedRuntimeBaseUrl.protocol !== 'http:'
-    || !['127.0.0.1', 'localhost', '::1'].includes(
-      normalizedRuntimeBaseUrl.hostname,
-    )
-    || normalizedRuntimeBaseUrl.username
-    || normalizedRuntimeBaseUrl.password
-    || normalizedRuntimeBaseUrl.search
-    || normalizedRuntimeBaseUrl.hash
+    resolveRuntimeTarget !== null
+    && typeof resolveRuntimeTarget !== 'function'
   ) {
+    throw new TypeError(
+      'The bridge runtime target resolver must be a function.',
+    );
+  }
+  const fixedBaseUrl = normalizeRuntimeBaseUrl(runtimeBaseUrl);
+  if (resolveRuntimeTarget === null && fixedBaseUrl === null) {
     throw new Error('The bridge runtime URL must be credential-free loopback HTTP.');
   }
-  const baseUrl = normalizedRuntimeBaseUrl.href.replace(/\/+$/, '');
   const operationRegistry = controlOperationRegistry({
     includeEvaluation: enableEvaluationRoutes,
   });
+
+  function baseUrlForRequest() {
+    if (resolveRuntimeTarget === null) return fixedBaseUrl;
+    try {
+      return normalizeRuntimeBaseUrl(
+        resolveRuntimeTarget(),
+      );
+    } catch {
+      return null;
+    }
+  }
+
+  function targetUnavailable({
+    response,
+    operation,
+    traceId,
+    retryDisposition,
+  }) {
+    return sendJson(response, 503, bridgeError({
+      reasonCode: 'bridge_runtime_target_unavailable',
+      bridgeStage: 'runtime_unreachable',
+      operation,
+      traceId,
+      deliveryState: 'not_dispatched',
+      retryDisposition,
+    }));
+  }
 
   async function performRuntimeFetch({
     request,
@@ -288,6 +341,15 @@ export function createMnemosyneSillyTavernBridge({
 
   async function handleCapabilities(request, response) {
     const traceId = traceIdForRequest(request);
+    const baseUrl = baseUrlForRequest();
+    if (baseUrl === null) {
+      return targetUnavailable({
+        response,
+        operation: 'capabilities',
+        traceId,
+        retryDisposition: 'safe',
+      });
+    }
     const runtimeResponse = await performRuntimeFetch({
       request,
       response: {
@@ -358,6 +420,12 @@ export function createMnemosyneSillyTavernBridge({
       negotiated_protocol: registryMatches ? negotiatedProtocol : null,
       runtime_build_id: health.runtime_build?.id ?? null,
       runtime_instance_id: health.runtime_instance_id ?? null,
+      active_main_runtime_profile_hash:
+        health.active_main_runtime_profile_hash ?? null,
+      active_operation_count:
+        Number.isSafeInteger(health.active_operation_count)
+          ? health.active_operation_count
+          : null,
       generation_binding_hash: health.generation_binding_hash ?? null,
       operation_registry_hash: health.operation_registry_hash ?? null,
       bridge_operation_registry_hash: bridgeRegistryHash,
@@ -412,6 +480,15 @@ export function createMnemosyneSillyTavernBridge({
       }));
     }
 
+    const baseUrl = baseUrlForRequest();
+    if (baseUrl === null) {
+      return targetUnavailable({
+        response,
+        operation: operationId,
+        traceId,
+        retryDisposition: operation.retry_class,
+      });
+    }
     const target = operation.runtime_target;
     let targetPath = target.path;
     if (target.body_path_parameter) {

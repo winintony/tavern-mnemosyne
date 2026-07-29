@@ -75,7 +75,9 @@ export function createProvisioningOrchestrator({
         return expected;
     }
 
-    async function inspect() {
+    async function inspect({
+        explicit = false,
+    } = {}) {
         try {
             const lease = await controlClient.resolveRootTransport();
             const expected = await expectedRuntimeBuildId();
@@ -102,7 +104,7 @@ export function createProvisioningOrchestrator({
                         : { reason_code: eligibility.reason_code }),
                 });
             }
-            await validateReadyLease(lease);
+            await validateReadyLease(lease, { explicit });
             return Object.freeze({
                 status: 'ready',
                 adapter,
@@ -179,7 +181,7 @@ export function createProvisioningOrchestrator({
     async function enable({
         onPlan,
     } = {}) {
-        const current = await inspect();
+        const current = await inspect({ explicit: true });
         if (current.status === 'ready') return current;
         if (current.adapter !== 'browser-folder') {
             throw orchestratorError(
@@ -234,7 +236,10 @@ export function createProvisioningOrchestrator({
         }
         let receipt;
         try {
-            const input = await loadBrowserFolderInput({ rootHandle });
+            const input = await loadBrowserFolderInput({
+                rootHandle,
+                explicit: true,
+            });
             const reconciled = await inspect();
             if (reconciled.status === 'ready') return reconciled;
             receipt = await provisionBrowserFolder({

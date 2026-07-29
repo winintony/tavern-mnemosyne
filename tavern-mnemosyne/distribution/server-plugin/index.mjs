@@ -20,6 +20,15 @@ import {
   completePendingCompanionRemoval,
   runCompanionTeardown,
 } from '../../src/runtime/companion-teardown.js';
+import {
+  createCompanionSupervisor,
+} from '../../src/runtime/companion-supervisor.js';
+import {
+  createMainRuntimeConfigurationStore,
+} from '../../src/runtime/main-runtime-configuration-store.js';
+import {
+  createMainRuntimeProfileEndpoint,
+} from '../../src/runtime/main-runtime-profile-endpoint.js';
 
 export const info = Object.freeze({
   id: 'tavern-mnemosyne',
@@ -60,6 +69,7 @@ let companionProcess = null;
 let lastExit = null;
 let startupError = null;
 let uninstallWatchTimer = null;
+let currentRuntimeBaseUrl = null;
 const COMPANION_START_TIMEOUT_MS = 30_000;
 const UNINSTALL_POLL_MS = 5_000;
 const sillyTavernRoot = path.resolve(
@@ -85,11 +95,13 @@ function serverHeldControlToken() {
 }
 
 async function startCompanion(contextAccessToken) {
+  startupError = null;
   if (process.env.MNEMOSYNE_EXTERNAL_RUNTIME === 'true') {
-    return (
+    currentRuntimeBaseUrl = (
       process.env.MNEMOSYNE_RUNTIME_URL
       || 'http://127.0.0.1:18991'
     );
+    return currentRuntimeBaseUrl;
   }
   if (!existsSync(launcherPath)) {
     throw new Error(
@@ -158,8 +170,84 @@ async function startCompanion(contextAccessToken) {
         return;
       }
       clearTimeout(timer);
-      resolve(runtimeUrl.href.replace(/\/$/, ''));
+      currentRuntimeBaseUrl =
+        runtimeUrl.href.replace(/\/$/, '');
+      resolve(currentRuntimeBaseUrl);
     });
+  });
+}
+
+async function stopCompanion() {
+  currentRuntimeBaseUrl = null;
+  if (!companionProcess) return;
+  const child = companionProcess;
+  companionProcess = null;
+  child.kill('SIGTERM');
+  await new Promise(resolve => {
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      resolve();
+    }, 5_000);
+    timer.unref();
+    child.once('exit', () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
+
+async function runtimeHealth(runtimeBaseUrl, contextAccessToken) {
+  if (typeof runtimeBaseUrl !== 'string' || !runtimeBaseUrl) {
+    throw new Error('The Mnemosyne runtime target is unavailable.');
+  }
+  const response = await fetch(`${runtimeBaseUrl}/health`, {
+    method: 'GET',
+    headers: {
+      accept: 'application/json',
+      'x-mnemosyne-session-token': contextAccessToken,
+    },
+    signal: AbortSignal.timeout(5_000),
+  });
+  if (!response.ok) {
+    throw new Error(
+      `The Mnemosyne runtime health check failed (${response.status}).`,
+    );
+  }
+  const health = await response.json();
+  if (
+    health?.schema !== 'mnemosyne.health.v1'
+    || health.status !== 'ok'
+  ) {
+    throw new Error('The Mnemosyne runtime health shape is invalid.');
+  }
+  return health;
+}
+
+async function verifiedRuntimeTarget(
+  candidate,
+  expectedProfileHash,
+  contextAccessToken,
+) {
+  const health = await runtimeHealth(
+    candidate?.runtime_base_url,
+    contextAccessToken,
+  );
+  if (
+    health.active_main_runtime_profile_hash
+      !== expectedProfileHash
+    || typeof health.runtime_instance_id !== 'string'
+    || !health.runtime_instance_id
+  ) {
+    const error = new Error(
+      'The Mnemosyne runtime did not activate the requested profile.',
+    );
+    error.reasonCode = 'runtime_profile_activation_mismatch';
+    throw error;
+  }
+  return Object.freeze({
+    runtime_base_url: candidate.runtime_base_url,
+    runtime_instance_id: health.runtime_instance_id,
+    active_profile_hash: expectedProfileHash,
   });
 }
 
@@ -193,12 +281,21 @@ export async function init(router) {
     return;
   }
   const contextAccessToken = serverHeldControlToken();
+  const configurationStore =
+    createMainRuntimeConfigurationStore({ configPath });
   router.use(requireSillyTavernBridgeSession);
-  let runtimeBaseUrl =
-    process.env.MNEMOSYNE_RUNTIME_URL
-    || 'http://127.0.0.1:0';
+  let initialTarget = null;
   try {
-    runtimeBaseUrl = await startCompanion(contextAccessToken);
+    const runtimeBaseUrl =
+      await startCompanion(contextAccessToken);
+    const configuredProfile = configurationStore.readProfile();
+    if (configuredProfile) {
+      initialTarget = await verifiedRuntimeTarget(
+        { runtime_base_url: runtimeBaseUrl },
+        configuredProfile.profile_hash,
+        contextAccessToken,
+      );
+    }
   } catch (error) {
     startupError = error instanceof Error ? error.message : String(error);
     console.error(
@@ -206,8 +303,51 @@ export async function init(router) {
       error,
     );
   }
+  const supervisor = createCompanionSupervisor({
+    initialTarget,
+    snapshotConfiguration:
+      configurationStore.snapshotConfiguration,
+    stageProfile: configurationStore.stageProfile,
+    restoreConfiguration:
+      configurationStore.restoreConfiguration,
+    stopRuntime: stopCompanion,
+    startRuntime: async () => ({
+      runtime_base_url:
+        await startCompanion(contextAccessToken),
+    }),
+    verifyRuntime: (
+      candidate,
+      expectedProfileHash,
+    ) => verifiedRuntimeTarget(
+      candidate,
+      expectedProfileHash,
+      contextAccessToken,
+    ),
+    isRuntimeBusy: async target => {
+      const runtimeBaseUrl =
+        target?.runtime_base_url ?? currentRuntimeBaseUrl;
+      if (!runtimeBaseUrl) return false;
+      try {
+        const health = await runtimeHealth(
+          runtimeBaseUrl,
+          contextAccessToken,
+        );
+        return (
+          !Number.isSafeInteger(
+            health.active_operation_count,
+          )
+          || health.active_operation_count > 0
+        );
+      } catch {
+        return true;
+      }
+    },
+  });
+  createMainRuntimeProfileEndpoint({
+    supervisor,
+  }).register(router);
   const bridge = createMnemosyneSillyTavernBridge({
-    runtimeBaseUrl,
+    resolveRuntimeTarget: supervisor.currentTarget,
     contextAccessToken,
     bridgeVersion: '1',
     enableEvaluationRoutes:
@@ -222,19 +362,5 @@ export async function exit() {
     clearInterval(uninstallWatchTimer);
     uninstallWatchTimer = null;
   }
-  if (!companionProcess) return;
-  const child = companionProcess;
-  companionProcess = null;
-  child.kill('SIGTERM');
-  await new Promise(resolve => {
-    const timer = setTimeout(() => {
-      child.kill('SIGKILL');
-      resolve();
-    }, 5_000);
-    timer.unref();
-    child.once('exit', () => {
-      clearTimeout(timer);
-      resolve();
-    });
-  });
+  await stopCompanion();
 }

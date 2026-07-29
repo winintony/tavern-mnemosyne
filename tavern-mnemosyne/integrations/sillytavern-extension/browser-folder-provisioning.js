@@ -500,11 +500,45 @@ export async function decodeAndVerifyRuntimeBundle({
 }
 
 export function createBrowserFolderRuntimeConfig({
+    mainRuntimeProfile = null,
     upstreamBaseUrl,
     upstreamModel,
     providerContextTokens,
     providerOutputReserveTokens,
 }) {
+    if (mainRuntimeProfile !== null) {
+        if (
+            !mainRuntimeProfile
+            || typeof mainRuntimeProfile !== 'object'
+            || Array.isArray(mainRuntimeProfile)
+            || mainRuntimeProfile.schema
+                !== 'mnemosyne.main-runtime-profile.v1'
+            || !/^[a-f0-9]{64}$/.test(
+                mainRuntimeProfile.profile_hash ?? '',
+            )
+        ) {
+            throw provisioningError(
+                'browser_folder_runtime_profile_invalid',
+                'The Main Runtime Profile is invalid.',
+            );
+        }
+        const base = createBrowserFolderRuntimeConfig({
+            upstreamBaseUrl: mainRuntimeProfile.upstream_url,
+            upstreamModel: mainRuntimeProfile.upstream_model,
+            providerContextTokens:
+                mainRuntimeProfile.provider_context_tokens,
+            providerOutputReserveTokens:
+                mainRuntimeProfile.provider_output_reserve_tokens,
+        });
+        return Object.freeze({
+            ...base,
+            schema: 'mnemosyne.runtime-config.v2',
+            mainRuntimeProfileHash:
+                mainRuntimeProfile.profile_hash,
+            mainRuntimeProfile:
+                Object.freeze(structuredClone(mainRuntimeProfile)),
+        });
+    }
     let parsedUrl;
     try {
         parsedUrl = new URL(upstreamBaseUrl);
@@ -587,6 +621,10 @@ export async function readInstalledBrowserFolderRuntimeConfig(rootHandle) {
         'The installed Mnemosyne runtime config',
     );
     return createBrowserFolderRuntimeConfig({
+        mainRuntimeProfile:
+            parsed.schema === 'mnemosyne.runtime-config.v2'
+                ? parsed.mainRuntimeProfile
+                : null,
         upstreamBaseUrl: parsed.upstreamBaseUrl,
         upstreamModel: parsed.upstreamModel,
         providerContextTokens: parsed.providerContextTokens,
@@ -785,6 +823,8 @@ export async function provisionBrowserFolder({
             );
         }
         const sealedRuntimeConfig = createBrowserFolderRuntimeConfig({
+            mainRuntimeProfile:
+                runtimeConfig?.mainRuntimeProfile ?? null,
             upstreamBaseUrl: runtimeConfig?.upstreamBaseUrl,
             upstreamModel: runtimeConfig?.upstreamModel,
             providerContextTokens:
@@ -794,7 +834,7 @@ export async function provisionBrowserFolder({
         });
         if (
             runtimeConfig?.schema
-                !== 'mnemosyne.runtime-config.v1'
+                !== sealedRuntimeConfig.schema
             || JSON.stringify(Object.keys(runtimeConfig).sort())
                 !== JSON.stringify(
                     Object.keys(sealedRuntimeConfig).sort(),

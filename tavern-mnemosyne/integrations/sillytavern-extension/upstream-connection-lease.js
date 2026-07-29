@@ -269,6 +269,81 @@ export function createUpstreamConnectionLease({
     throw upstreamUrlError();
   }
 
+  function resolveExplicitProvisioningBinding({
+    currentUrl,
+    currentModel = null,
+    installedRuntimeUrl = '',
+    installedRuntimeModel = null,
+    runtimeUrl,
+  }) {
+    const settings = readSettings();
+    const connectionManager = readConnectionManager();
+    const profile = selectedProfile(connectionManager);
+    if (profile) {
+      let upstreamUrl = normalizedHttpUrl(profile['api-url']);
+      const upstreamModel = normalizedModel(profile.model);
+      if (
+        profile.api !== 'custom'
+        || !upstreamModel
+        || typeof profile['secret-id'] !== 'string'
+        || !profile['secret-id']
+      ) {
+        throw new UpstreamConnectionLeaseError(
+          'upstream_connection_profile_lease_invalid',
+          'The explicitly selected upstream profile is incomplete.',
+        );
+      }
+      if (isRuntimeEndpoint(upstreamUrl, runtimeUrl)) {
+        const persistedProfileUrl = (
+          settings.upstreamConnectionProfileId === profile.id
+            ? normalizedHttpUrl(
+              settings.upstreamConnectionProfileUrl,
+            )
+            : null
+        );
+        if (
+          !persistedProfileUrl
+          || isRuntimeEndpoint(persistedProfileUrl, runtimeUrl)
+        ) {
+          throw new UpstreamConnectionLeaseError(
+            'upstream_connection_profile_lease_invalid',
+            'The selected upstream profile only exposes the running local runtime.',
+          );
+        }
+        upstreamUrl = persistedProfileUrl;
+      }
+      if (!upstreamUrl) {
+        throw upstreamUrlError();
+      }
+      persistProfileLease(profile, upstreamUrl);
+      return Object.freeze({
+        upstreamModel,
+        upstreamUrl,
+      });
+    }
+
+    const upstreamUrl = resolveForProvisioning({
+      currentUrl,
+      currentModel,
+      installedRuntimeUrl,
+      installedRuntimeModel,
+      runtimeUrl,
+    });
+    const upstreamModel = normalizedModel(
+      installedRuntimeModel ?? currentModel,
+    );
+    if (!upstreamModel) {
+      throw new UpstreamConnectionLeaseError(
+        'browser_folder_upstream_model_missing',
+        'The upstream model is missing.',
+      );
+    }
+    return Object.freeze({
+      upstreamModel,
+      upstreamUrl,
+    });
+  }
+
   function restoreSelectedProfile(runtimeUrl) {
     const settings = readSettings();
     const connectionManager = readConnectionManager();
@@ -361,9 +436,24 @@ export function createUpstreamConnectionLease({
   async function assertRuntimeBinding({
     expectedProviderContextTokens,
     expectedProviderOutputReserveTokens,
+    requireSelectedProfile = false,
     runtimeCapabilities,
     runtimeLease,
   }) {
+    if (requireSelectedProfile) {
+      const settings = readSettings();
+      const connectionManager = readConnectionManager();
+      const activeProfile = selectedProfile(connectionManager);
+      const leasedProfileId = String(
+        settings.upstreamConnectionProfileId ?? '',
+      ).trim();
+      if ((activeProfile?.id ?? '') !== leasedProfileId) {
+        throw new UpstreamConnectionLeaseError(
+          'upstream_connection_profile_reprovision_required',
+          'The explicitly selected upstream profile is not the running sealed binding.',
+        );
+      }
+    }
     const runtimeModel = normalizedModel(
       runtimeCapabilities?.main_host_binding?.model,
     );
@@ -453,6 +543,7 @@ export function createUpstreamConnectionLease({
 
   return Object.freeze({
     resolveForProvisioning,
+    resolveExplicitProvisioningBinding,
     restoreSelectedProfile,
     bindHostRequest,
     assertRuntimeBinding,

@@ -9,6 +9,8 @@ const BRIDGE_CAPABILITIES_PATH =
   '/api/plugins/tavern-mnemosyne/v1/capabilities';
 const BRIDGE_CONTROL_PREFIX =
   '/api/plugins/tavern-mnemosyne/v1/control';
+const BRIDGE_PROFILE_ACTIVATION_PATH =
+  '/api/plugins/tavern-mnemosyne/v1/runtime-profile/activate';
 const SUPPORTED_PROTOCOLS = Object.freeze(['1']);
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
 
@@ -276,6 +278,12 @@ async function loopbackCapabilities(health, loopbackBaseUrl) {
       .find(version => SUPPORTED_PROTOCOLS.includes(version)) ?? null,
     runtime_build_id: health.runtime_build?.id ?? null,
     runtime_instance_id: health.runtime_instance_id ?? null,
+    active_main_runtime_profile_hash:
+      health.active_main_runtime_profile_hash ?? null,
+    active_operation_count:
+      Number.isSafeInteger(health.active_operation_count)
+        ? health.active_operation_count
+        : null,
     generation_binding_hash: health.generation_binding_hash ?? null,
     operation_registry_hash: health.operation_registry_hash ?? null,
     registry_compatible:
@@ -301,6 +309,7 @@ export function createMnemosyneControlClient({
   fetchImpl = globalThis.fetch,
   now = () => new Date(),
   transportResolveTimeoutMs = 3_000,
+  profileActivationTimeoutMs = 30_000,
 } = {}) {
   const resolvedPageUrl = new URL(pageUrl);
   const bridgeCapabilitiesUrl = new URL(
@@ -319,6 +328,86 @@ export function createMnemosyneControlClient({
     throw new Error(
       'Transport resolution timeout must be a positive integer.',
     );
+  }
+  if (
+    !Number.isSafeInteger(profileActivationTimeoutMs)
+    || profileActivationTimeoutMs <= 0
+  ) {
+    throw new TypeError(
+      'Profile activation timeout must be a positive integer.',
+    );
+  }
+
+  async function activateRuntimeProfile(profile, {
+    signal,
+  } = {}) {
+    if (
+      !profile
+      || typeof profile !== 'object'
+      || Array.isArray(profile)
+      || !/^[a-f0-9]{64}$/.test(profile.profile_hash ?? '')
+    ) {
+      fail(
+        'runtime_profile_invalid',
+        'The requested Main Runtime Profile is invalid.',
+      );
+    }
+    const auth = normalizeHostAuthContext(getHostAuthContext?.());
+    let response;
+    try {
+      response = await fetchWithDeadline(
+        fetchImpl,
+        new URL(
+          BRIDGE_PROFILE_ACTIVATION_PATH,
+          resolvedPageUrl,
+        ),
+        {
+          method: 'POST',
+          headers: mergeRequestHeaders(auth.headers, {
+            accept: 'application/json',
+            'content-type': 'application/json',
+          }),
+          credentials: auth.credentials,
+          cache: 'no-store',
+          body: JSON.stringify({ profile }),
+        },
+        {
+          signal,
+          timeoutMs: profileActivationTimeoutMs,
+        },
+      );
+    } catch (error) {
+      fail(
+        error instanceof MnemosyneControlError
+          ? error.reasonCode
+          : 'runtime_profile_activation_unavailable',
+        'The Main Runtime Profile could not be activated.',
+        { cause: error?.name ?? 'unknown' },
+      );
+    }
+    const body = await readJson(response);
+    if (
+      !response.ok
+      || body?.schema
+        !== 'mnemosyne.runtime-profile-activation.v1'
+      || body.status !== 'ready'
+      || body.active_profile_hash !== profile.profile_hash
+      || typeof body.runtime_instance_id !== 'string'
+      || !body.runtime_instance_id
+    ) {
+      fail(
+        body?.reason_code
+          ?? 'runtime_profile_activation_mismatch',
+        'The Main Runtime Profile activation was not verified.',
+        { status: response.status },
+      );
+    }
+    return Object.freeze({
+      status: 'ready',
+      active_profile_hash: body.active_profile_hash,
+      runtime_instance_id: body.runtime_instance_id,
+      reused: body.reused === true,
+    });
   }
 
   async function resolveRootTransport({ signal } = {}) {
@@ -520,6 +609,7 @@ export function createMnemosyneControlClient({
   }
 
   const client = {
+    activateRuntimeProfile,
     resolveRootTransport,
     capabilitiesForLease(lease) {
       assertLease(lease);

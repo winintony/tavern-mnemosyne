@@ -298,6 +298,9 @@ const upstreamBaseUrl = String(
 const upstreamModel = String(
   process.env.MNEMOSYNE_UPSTREAM_MODEL || '',
 ).trim();
+const mainRuntimeProfileHash = String(
+  process.env.MNEMOSYNE_MAIN_RUNTIME_PROFILE_HASH || '',
+).trim() || null;
 const upstreamAuthMode = (
   process.env.MNEMOSYNE_UPSTREAM_AUTH_MODE || 'configured'
 );
@@ -608,6 +611,7 @@ const proxy = createMnemosyneProxy({
   upstreamApiKey: process.env.MNEMOSYNE_UPSTREAM_API_KEY,
   upstreamAuthMode,
   upstreamModel,
+  mainRuntimeProfileHash,
   upstreamHeaders,
   proxyToken: process.env.MNEMOSYNE_PROXY_TOKEN,
   contextAccessToken: process.env.MNEMOSYNE_CONTEXT_ACCESS_TOKEN,

@@ -105,6 +105,34 @@ const BLOCK_REASON_FEEDBACK = Object.freeze({
     text: '连接预设的密钥无效',
     action: '请重新连接该预设',
   },
+  runtime_profile_operation_busy: {
+    text: '上一项运行操作尚未结束',
+    action: '请稍候再发送',
+  },
+  runtime_profile_switch_busy: {
+    text: '另一项运行配置切换正在进行',
+    action: '请等待切换结束后重试',
+  },
+  runtime_profile_activation_unavailable: {
+    text: '运行配置切换后未能恢复可用状态',
+    action: '请检查运行组件后重试',
+  },
+  runtime_profile_activation_failed: {
+    text: '运行配置未能启用',
+    action: '已恢复此前配置，请检查连接后重试',
+  },
+  runtime_profile_activation_mismatch: {
+    text: '运行配置没有通过一致性验证',
+    action: '请重新选择连接后重试',
+  },
+  runtime_profile_connection_invalid: {
+    text: '当前 Connection Profile 不完整',
+    action: '请选择完整的 Custom 连接后重试',
+  },
+  send_intent_changed: {
+    text: '等待期间输入或聊天发生了变化',
+    action: '请确认当前输入后重新发送',
+  },
   chat_id_missing: {
     text: '还没打开角色聊天',
     action: '请先打开一个角色聊天',

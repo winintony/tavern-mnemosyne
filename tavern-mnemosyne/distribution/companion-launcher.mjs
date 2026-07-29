@@ -39,6 +39,8 @@ const environmentMap = Object.freeze({
   providerContextTokens: 'MNEMOSYNE_PROVIDER_CONTEXT_TOKENS',
   providerOutputReserveTokens:
     'MNEMOSYNE_PROVIDER_OUTPUT_RESERVE_TOKENS',
+  mainRuntimeProfileHash:
+    'MNEMOSYNE_MAIN_RUNTIME_PROFILE_HASH',
   proxyToken: 'MNEMOSYNE_PROXY_TOKEN',
   contextMode: 'MNEMOSYNE_CONTEXT_MODE',
   contextAccessToken: 'MNEMOSYNE_CONTEXT_ACCESS_TOKEN',

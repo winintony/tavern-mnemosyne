@@ -10,6 +10,7 @@ import {
     main_api,
     saveMetadata,
     saveSettingsDebounced,
+    sendTextareaMessage,
     setExtensionPrompt,
     substituteParams,
     this_chid,
@@ -25,11 +26,15 @@ import {
     getChatCompletionPreset,
     oai_settings,
     promptManager,
+    settingsToUpdate,
 } from '/scripts/openai.js';
 import { countTokensOpenAIAsync } from '/scripts/tokenizers.js';
 import { hasPendingFileAttachment } from '/scripts/chats.js';
 import { getGroupNames } from '/scripts/group-chats.js';
 import { persona_description_positions, power_user } from '/scripts/power-user.js';
+import {
+    shouldSendOnEnter,
+} from '/scripts/RossAscends-mods.js';
 import { getCharaFilename } from '/scripts/utils.js';
 import {
     getRegexedString,
@@ -151,6 +156,15 @@ import {
     createMnemosyneControlClient,
 } from './mnemosyne-control-client.js';
 import {
+    buildMainRuntimeProfile,
+    createMainRuntimeProfileRouter,
+    fingerprintMainRuntimePreset,
+} from './main-runtime-profile-router.js';
+import {
+    createSendCoordinator,
+    installInteractiveSendAdapter,
+} from './send-coordinator.js';
+import {
     createBrowserFolderRuntimeConfig,
     localRuntimeProxyUrl,
     readInstalledBrowserFolderRuntimeConfig,
@@ -194,6 +208,22 @@ const DEFAULT_SETTINGS = Object.freeze({
     upstreamConnectionProfileId: '',
     upstreamConnectionProfileUrl: '',
 });
+const MAIN_RUNTIME_PRESET_CONNECTION_FIELDS = Object.freeze(
+    Object.entries(settingsToUpdate)
+        .filter(([key, definition]) => (
+            definition?.[3] === true
+            && key !== 'custom_prompt_post_processing'
+        ))
+        .map(([key]) => key),
+);
+
+class ExtensionOperationError extends Error {
+    constructor(reasonCode, message) {
+        super(message);
+        this.name = 'ExtensionOperationError';
+        this.reasonCode = reasonCode;
+    }
+}
 
 const browserFolderHandleStore = createBrowserFolderHandleStore();
 
@@ -364,6 +394,7 @@ const STATUS_DISPLAY_TEXT = Object.freeze({
     'Running forwarding check': '正在检查转发…',
     'Preparing intake': '正在准备设定导入…',
     'Checking model deployment': '正在检查模型部署…',
+    'Switching runtime profile': '正在切换并验证运行配置…',
     'Static Lore sources or intake state changed':
         '设定来源已变化，将重新导入。',
     'Blocked: enable Mnemosyne': '请先开启 Mnemosyne。',
@@ -393,6 +424,20 @@ const BLOCK_REASON_TEXT = Object.freeze({
         '设定初始化模型调用未完成，已保留进度；请重试，持续失败请切换兼容模型',
     static_lore_intake_upstream_response_error:
         '模型端点暂时没有完成设定初始化，已保留进度；请重试',
+    runtime_profile_operation_busy:
+        '上一项运行操作尚未结束，请稍候重试',
+    runtime_profile_switch_busy:
+        '另一项运行配置切换正在进行，请稍候',
+    runtime_profile_activation_unavailable:
+        '运行配置切换失败，旧配置也未能恢复',
+    runtime_profile_activation_failed:
+        '运行配置未能启用，已恢复此前配置',
+    runtime_profile_activation_mismatch:
+        '运行配置启用后未通过一致性验证',
+    runtime_profile_connection_invalid:
+        '请选择完整的 Custom Connection Profile',
+    send_intent_changed:
+        '等待期间输入或聊天发生变化，请确认后重新发送',
 });
 
 // Raw status values stay in state for governance logic and contract
@@ -577,6 +622,198 @@ const upstreamConnectionLease =
         readConnectionManager: currentConnectionManager,
         save: saveSettingsDebounced,
     });
+const mainRuntimeProfileRouter =
+    createMainRuntimeProfileRouter({
+        readActiveProfileHash: async () => {
+            const lease =
+                await currentControlClient()
+                    .resolveRootTransport();
+            return currentControlClient()
+                .capabilitiesForLease(lease)
+                .active_main_runtime_profile_hash
+                ?? null;
+        },
+        activateProfile: profile =>
+            currentControlClient()
+                .activateRuntimeProfile(profile),
+        onState(profileState) {
+            if (profileState.status === 'switching') {
+                updateStatus('Switching runtime profile');
+            }
+        },
+    });
+
+function currentInteractiveSendIntent() {
+    const context = getContext();
+    const textarea = document.querySelector('#send_textarea');
+    return Object.freeze({
+        chatId: context.chatId ?? null,
+        generationType: 'normal',
+        textarea: String(textarea?.value ?? ''),
+        chatLength: Array.isArray(context.chat)
+            ? context.chat.length
+            : 0,
+    });
+}
+
+function captureInteractiveSendIntent() {
+    if (!settings().enabled) return null;
+    const intent = currentInteractiveSendIntent();
+    if (
+        intent.textarea.trimStart().startsWith('/')
+        || (
+            intent.textarea.length === 0
+            && !hasPendingFileAttachment()
+        )
+    ) {
+        return null;
+    }
+    return intent;
+}
+
+function interactiveIntentStillCurrent(intent) {
+    const current = currentInteractiveSendIntent();
+    return (
+        current.chatId === intent.chatId
+        && current.generationType === intent.generationType
+        && current.textarea === intent.textarea
+        && current.chatLength === intent.chatLength
+    );
+}
+
+async function ensureSelectedMainRuntimeProfile() {
+    const desiredProfile =
+        await selectedMainRuntimeProfile();
+    if (!upstreamConnectionLease.captureSelectedProfile(
+        desiredProfile.upstream_url,
+        configuredRuntimeProxyUrl(),
+        desiredProfile.upstream_model,
+    )) {
+        throw new ExtensionOperationError(
+            'runtime_profile_connection_invalid',
+            'The selected connection profile could not be leased.',
+        );
+    }
+    const activation =
+        await mainRuntimeProfileRouter.ensure(desiredProfile);
+    if (activation.status !== 'ready') {
+        throw new ExtensionOperationError(
+            activation.reasonCode
+                ?? 'runtime_profile_activation_unavailable',
+            'The selected Main Runtime Profile is unavailable.',
+        );
+    }
+    state.transportLease = null;
+    const lease = await resolveControlLease();
+    const capabilities =
+        currentControlClient().capabilitiesForLease(lease);
+    if (
+        capabilities.active_main_runtime_profile_hash
+            !== desiredProfile.profile_hash
+    ) {
+        throw new ExtensionOperationError(
+            'runtime_profile_activation_mismatch',
+            'The active Main Runtime Profile does not match.',
+        );
+    }
+    bindProvisionedGenerationEndpoint(lease);
+}
+
+function denyInteractiveSend(reasonCode) {
+    updateStatus(`Blocked: ${reasonCode}`);
+    sendWindowOpen = false;
+    return Object.freeze({
+        status: 'deny',
+        reasonCode,
+    });
+}
+
+async function preflightInteractiveSend(intent) {
+    sendWindowOpen = true;
+    runStatusFloatController.onSendHeld({
+        chatId: intent.chatId,
+        likelyPending:
+            intakeLikelyPendingForChat(intent.chatId),
+    });
+    if (state.exclusiveOperation !== null) {
+        return denyInteractiveSend(
+            `${state.exclusiveOperation}_operation_active`,
+        );
+    }
+    try {
+        await ensureSelectedMainRuntimeProfile();
+        if (!interactiveIntentStillCurrent(intent)) {
+            return denyInteractiveSend('send_intent_changed');
+        }
+        const admission =
+            await runGenerationAdmissionGates({
+                isEnabled: () => settings().enabled,
+                dryRun: false,
+                resolveHistoryInvalidation: () =>
+                    historyInvalidationCoordinator.run(
+                        () =>
+                            resolvePendingHistoryEditBeforeGeneration(
+                                intent.chatId,
+                            ),
+                        { chatId: intent.chatId },
+                    ),
+                ensureStaticLoreReady: () =>
+                    ensureStaticLoreReadyForGeneration(
+                        intent.chatId,
+                    ),
+            });
+        if (admission.status !== 'ready') {
+            return denyInteractiveSend(
+                admission.reasonCode
+                ?? (
+                    admission.status === 'disabled'
+                        ? 'mnemosyne_disabled'
+                        : 'generation_preflight_indeterminate'
+                ),
+            );
+        }
+        if (!interactiveIntentStillCurrent(intent)) {
+            return denyInteractiveSend('send_intent_changed');
+        }
+        return Object.freeze({ status: 'allow' });
+    } catch (error) {
+        return denyInteractiveSend(
+            error?.reasonCode
+            ?? 'generation_preflight_indeterminate',
+        );
+    }
+}
+
+const sendCoordinator = createSendCoordinator({
+    preflight: preflightInteractiveSend,
+    async dispatch(intent) {
+        if (!interactiveIntentStillCurrent(intent)) {
+            const error = new ExtensionOperationError(
+                'send_intent_changed',
+                'The captured send intent changed before dispatch.',
+            );
+            updateStatus(`Blocked: ${error.reasonCode}`);
+            sendWindowOpen = false;
+            throw error;
+        }
+        await sendTextareaMessage();
+    },
+});
+let interactiveSendAdapter = null;
+
+function installMainInteractiveSendAdapter() {
+    if (interactiveSendAdapter) return;
+    const sendButton = document.querySelector('#send_but');
+    const textarea = document.querySelector('#send_textarea');
+    if (!sendButton || !textarea) return;
+    interactiveSendAdapter = installInteractiveSendAdapter({
+        coordinator: sendCoordinator,
+        sendButton,
+        textarea,
+        captureIntent: captureInteractiveSendIntent,
+        shouldSendOnEnter,
+    });
+}
 
 // Floating micro-window state: which verdict/facet is picked before
 // submit, and whether the card is collapsed back into the pill.
@@ -1181,6 +1418,54 @@ function currentHostBinding() {
 
 function currentConnectionManager() {
     return getContext().extensionSettings?.connectionManager ?? null;
+}
+
+function selectedConnectionProfile() {
+    const connectionManager = currentConnectionManager();
+    return connectionManager?.profiles?.find(
+        profile =>
+            profile?.id === connectionManager.selectedProfile,
+    ) ?? null;
+}
+
+async function mainRuntimeProfileForBinding({
+    upstreamUrl,
+    upstreamModel,
+}) {
+    const selectedProfile = selectedConnectionProfile();
+    if (!selectedProfile) {
+        throw new ExtensionOperationError(
+            'runtime_profile_connection_invalid',
+            '启用 Mnemosyne 前请选择一个 Custom Connection Profile。',
+        );
+    }
+    const presetFingerprint =
+        await fingerprintMainRuntimePreset({
+            preset: getChatCompletionPreset(),
+            connectionFieldNames:
+                MAIN_RUNTIME_PRESET_CONNECTION_FIELDS,
+        });
+    return buildMainRuntimeProfile({
+        connectionProfile: {
+            ...selectedProfile,
+            'api-url': upstreamUrl,
+            model: upstreamModel,
+        },
+        presetFingerprint,
+        providerContextTokens:
+            Number(oai_settings.openai_max_context),
+        providerOutputReserveTokens:
+            Number(oai_settings.openai_max_tokens),
+    });
+}
+
+async function selectedMainRuntimeProfile() {
+    protectUpstreamConnectionProfile();
+    const selectedProfile = selectedConnectionProfile();
+    return mainRuntimeProfileForBinding({
+        upstreamUrl: selectedProfile?.['api-url'],
+        upstreamModel: selectedProfile?.model,
+    });
 }
 
 function protectUpstreamConnectionProfile() {
@@ -2968,6 +3253,13 @@ async function onGenerationStarted(
 ) {
     censusMark('GENERATION_ENTRY_ADMISSION', 'enter', { runId: state.runId ?? null });
     const nextGenerationType = generationType ?? 'normal';
+    const coordinatedPermit = (
+        dryRun === false
+        && nextGenerationType === 'normal'
+        && sendCoordinator.consumePermit(
+            currentInteractiveSendIntent(),
+        )
+    );
     if (dryRun === true && state.activeRunMarker) {
         beginForeignDryFrame(state.activeRunMarker);
         return;
@@ -3020,14 +3312,19 @@ async function onGenerationStarted(
     // of the intake gate) so a slow history check is no longer a
     // zero-feedback window. Only a real send opens it, matching
     // sendWindowOpen's own dryRun===false gating.
-    if (dryRun === false) {
+    if (dryRun === false && !coordinatedPermit) {
         runStatusFloatController.onSendHeld({
             chatId: historyChatId,
             likelyPending: intakeLikelyPendingForChat(historyChatId),
         });
     }
-    const admission =
-        await runGenerationAdmissionGates({
+    const admission = coordinatedPermit
+        ? Object.freeze({
+            status: 'ready',
+            gate: null,
+            reasonCode: null,
+        })
+        : await runGenerationAdmissionGates({
             isEnabled: () =>
                 settings().enabled,
             dryRun: dryRun === true,
@@ -5101,6 +5398,7 @@ async function resolveCurrentProvisioningUpstreamUrl(
 
 async function browserFolderProvisioningInput({
     rootHandle,
+    explicit = false,
 } = {}) {
     const preset = getChatCompletionPreset();
     if (
@@ -5144,21 +5442,43 @@ async function browserFolderProvisioningInput({
                 'Mnemosyne bootstrap',
             ),
         ]);
+    const liveHostBinding = currentHostBinding();
+    let provisioningBinding = null;
+    if (explicit) {
+        const installed =
+            await readInstalledBrowserFolderRuntimeConfig(rootHandle);
+        provisioningBinding =
+            upstreamConnectionLease
+                .resolveExplicitProvisioningBinding({
+                    currentUrl: preset.custom_url,
+                    currentModel: liveHostBinding.model,
+                    installedRuntimeUrl:
+                        installed?.upstreamBaseUrl,
+                    installedRuntimeModel:
+                        installed?.upstreamModel,
+                    runtimeUrl: configuredRuntimeProxyUrl(),
+                });
+    }
+    const upstreamUrl =
+        provisioningBinding?.upstreamUrl
+        ?? await resolveCurrentProvisioningUpstreamUrl(
+            preset.custom_url,
+            rootHandle,
+            liveHostBinding.model,
+        );
+    const upstreamModel =
+        provisioningBinding?.upstreamModel
+        ?? liveHostBinding.model;
+    const mainRuntimeProfile =
+        await mainRuntimeProfileForBinding({
+            upstreamUrl,
+            upstreamModel,
+        });
     return Object.freeze({
         hostVersion: hostVersion.pkgVersion,
         expectedExtensionVersion: extensionManifest.version,
         runtimeConfig: createBrowserFolderRuntimeConfig({
-            upstreamBaseUrl:
-                await resolveCurrentProvisioningUpstreamUrl(
-                    preset.custom_url,
-                    rootHandle,
-                    currentHostBinding().model,
-                ),
-            upstreamModel: currentHostBinding().model,
-            providerContextTokens:
-                Number(oai_settings.openai_max_context),
-            providerOutputReserveTokens:
-                Number(oai_settings.openai_max_tokens),
+            mainRuntimeProfile,
         }),
         bootstrapSource,
     });
@@ -5195,12 +5515,15 @@ function currentProvisioningOrchestrator() {
         controlClient: currentControlClient(),
         loadBrowserFolderInput: browserFolderProvisioningInput,
         loadExpectedRuntimeBuildId: shippedRuntimeBuildId,
-        validateReadyLease: lease =>
+        validateReadyLease: (lease, {
+            explicit = false,
+        } = {}) =>
             upstreamConnectionLease.assertRuntimeBinding({
                 expectedProviderContextTokens:
                     Number(oai_settings.openai_max_context),
                 expectedProviderOutputReserveTokens:
                     Number(oai_settings.openai_max_tokens),
+                requireSelectedProfile: explicit,
                 runtimeCapabilities:
                     currentControlClient().capabilitiesForLease(lease),
                 runtimeLease: lease,
@@ -5355,6 +5678,8 @@ const PROVISIONING_ERROR_MESSAGES = Object.freeze({
         '多个连接具有相同的上游地址和模型。请明确选择一个连接后重新打开运行开关。',
     upstream_connection_profile_lease_invalid:
         '已保存的上游连接绑定已失效。请重新选择连接并打开运行开关。',
+    upstream_connection_profile_reprovision_required:
+        '已选择不同连接，正在重新准备对应的运行组件。',
     browser_folder_provider_budget_invalid:
         '请检查上下文长度与回复长度设置后重试。',
     browser_folder_permission_not_granted:
@@ -5456,6 +5781,7 @@ async function enableMnemosyneFromProvisioningCard({
 }
 
 function addSettingsUi() {
+    installMainInteractiveSendAdapter();
     if (document.querySelector('#tavern_mnemosyne_settings')) return;
 
     const container = document.createElement('div');

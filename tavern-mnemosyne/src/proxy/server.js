@@ -31,6 +31,9 @@ import {
   createStorySourceAdmissionInput,
 } from '../runtime/story-source-host-adapter.js';
 import {
+  createRuntimeOperationTracker,
+} from '../runtime/runtime-operation-tracker.js';
+import {
   assertProviderBudgetMatchesPolicy,
   assertProviderStepWithinBudget,
   constrainProviderRequestOutput,
@@ -1368,6 +1371,7 @@ export function createMnemosyneProxy({
   upstreamApiKey,
   upstreamAuthMode,
   upstreamModel,
+  mainRuntimeProfileHash = null,
   upstreamHeaders = {},
   proxyToken,
   contextAccessToken,
@@ -1419,6 +1423,14 @@ export function createMnemosyneProxy({
   if (typeof requireGenerationTransportBinding !== 'boolean') {
     throw new Error(
       'requireGenerationTransportBinding must be a boolean.',
+    );
+  }
+  if (
+    mainRuntimeProfileHash !== null
+    && !HASH_PATTERN.test(mainRuntimeProfileHash)
+  ) {
+    throw new TypeError(
+      'mainRuntimeProfileHash must be a SHA-256 hash or null.',
     );
   }
   if (
@@ -1652,6 +1664,7 @@ export function createMnemosyneProxy({
       ? (grant, evidence) => sourceRemovalGrantService.verify(grant, evidence)
       : undefined);
   let listenUrl = null;
+  const runtimeOperations = createRuntimeOperationTracker();
 
   const server = http.createServer(async (request, response) => {
     let requestBody = null;
@@ -1690,6 +1703,9 @@ export function createMnemosyneProxy({
           schema: 'mnemosyne.health.v1',
           supported_protocols: [...RUNTIME_SUPPORTED_PROTOCOLS],
           runtime_instance_id: runtimeInstanceId,
+          active_main_runtime_profile_hash:
+            mainRuntimeProfileHash,
+          ...runtimeOperations.snapshot(),
           generation_binding_hash: resolvedGenerationBindingHash,
           operation_registry_hash: operationRegistryHash,
           storage_status: sqliteRuntimeHealth ? 'ready' : 'unknown',
@@ -1817,6 +1833,8 @@ export function createMnemosyneProxy({
               },
         });
       }
+
+      runtimeOperations.begin(response);
 
       if (
         request.method === 'GET'

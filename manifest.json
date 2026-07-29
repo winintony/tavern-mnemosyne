@@ -7,5 +7,5 @@
   "css": "tavern-mnemosyne/integrations/sillytavern-extension/style.css",
   "generate_interceptor": "TavernMnemosyneGenerationInterceptor",
   "author": "Tavern Mnemosyne",
-  "version": "0.2.7"
+  "version": "0.2.8"
 }

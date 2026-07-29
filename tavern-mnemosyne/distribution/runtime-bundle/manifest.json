@@ -1,28 +1,28 @@
 {
   "schema": "mnemosyne.self-contained-runtime-bundle.v1",
-  "runtime_build_id": "tavern-mnemosyne@0.2.7+runtime.32fcc66a37296fdf",
-  "package_version": "0.2.7",
+  "runtime_build_id": "tavern-mnemosyne@0.2.8+runtime.6d8c5ad5ed46d220",
+  "package_version": "0.2.8",
   "minimum_node_major": 22,
   "entrypoint": "companion-launcher.mjs",
   "archive": "runtime.tar.gz",
-  "archive_sha256": "5de88c4f61a9b194c581469e55c58d837f231f879d1be72555567550e76a3e07",
-  "archive_bytes": 28508939,
+  "archive_sha256": "14263a4929c4e1e7944d1a678e25b85aee3f348e3753cdfd98e777f86500f301",
+  "archive_bytes": 28538640,
   "release_asset": {
     "repository": "winintony/tavern-mnemosyne",
-    "tag": "v0.2.7",
-    "name": "Tavern-Mnemosyne-Runtime-v0.2.7.tar.gz"
+    "tag": "v0.2.8",
+    "name": "Tavern-Mnemosyne-Runtime-v0.2.8.tar.gz"
   },
-  "content_manifest_sha256": "32fcc66a37296fdf249a786ef718f7abce432d0dd11087f9bb5efd8189e023fb",
+  "content_manifest_sha256": "6d8c5ad5ed46d220a448316d2f046b3da64b904b20a14fb02d5da9293b2a50b2",
   "files": [
     {
       "path": "companion-launcher.mjs",
-      "sha256": "0a85c8dd2db9b5963c77462789e76724b714f95b19f9311eba4e39a16cafb677",
-      "bytes": 2318
+      "sha256": "b62835d9aaaf56bd05fc20ebae38d8696d3e3dc29159cea4201af88d79a385af",
+      "bytes": 2387
     },
     {
       "path": "distribution/server-plugin/index.mjs",
-      "sha256": "5f892d85ee736f7303610dffdfbf66881dfbf3dce2a7995c9bfb525a96f9d63d",
-      "bytes": 7001
+      "sha256": "0dc20ffe6c8e5446815dc8131ee43934470a4235bca468420d17538c3dfd7240",
+      "bytes": 10625
     },
     {
       "path": "node_modules/.bin/yaml",
@@ -2551,12 +2551,12 @@
     },
     {
       "path": "package-lock.json",
-      "sha256": "6779f0ed0aff552b8d3e79f94aa74b9d15186d7db34505070fdb4b0c043c60f0",
+      "sha256": "6cd12bc5524c203c6593c8d6acf8cc37524e3d54856e43ef727278e5d0011b5d",
       "bytes": 1436
     },
     {
       "path": "package.json",
-      "sha256": "e198da22d005294dc81cf76445fd0df1b07e470d7f679960085028fb8057f5b9",
+      "sha256": "af5e02f7b2824e1a892a639df21781d51316db5b921128629ac30c77a494e171",
       "bytes": 850
     },
     {
@@ -2606,8 +2606,8 @@
     },
     {
       "path": "src/control/sillytavern-bridge.js",
-      "sha256": "4e51418c3b5f34a2b2dcc6b543dd7f0def7b80192f0651571ef6dfa5a7d589b4",
-      "bytes": 14646
+      "sha256": "fc039c2eb5b4070b94b25d45434892efd50b7bdd89d531ca474480f22d37ca4a",
+      "bytes": 16431
     },
     {
       "path": "src/craft/active-lane-bodies.js",
@@ -2926,8 +2926,8 @@
     },
     {
       "path": "src/proxy/cli.js",
-      "sha256": "d99422bb09744521e02a1e269304428f0c17dc091a464b6d39104f34eb3d3a54",
-      "bytes": 20802
+      "sha256": "c09bbd27fbfe4a7296a0222b88101f14f9fd4a0b9a1df47aa2e57ae4bc72f198",
+      "bytes": 20942
     },
     {
       "path": "src/proxy/openai-tool-provider.js",
@@ -2951,8 +2951,8 @@
     },
     {
       "path": "src/proxy/server.js",
-      "sha256": "3e485af2b9171783a15d16f608a52966251125cdf29fd3833325fac42a240a8d",
-      "bytes": 114385
+      "sha256": "0588619e7737086a7174da03d904c30f63b3d2903ec8af24e5e62044f6b7fdb3",
+      "bytes": 114935
     },
     {
       "path": "src/runtime/accepted-target-evidence.js",
@@ -2968,6 +2968,11 @@
       "path": "src/runtime/chat-write-coordinator.js",
       "sha256": "bcc2159ef4a9e6076ba7caf9460d4c7ee0f11c55e7736dec2f023cad22e184c7",
       "bytes": 990
+    },
+    {
+      "path": "src/runtime/companion-supervisor.js",
+      "sha256": "dcc51178a647284b221a558da21414277ed8852968bf6c15cf9cfb9af31a201f",
+      "bytes": 7255
     },
     {
       "path": "src/runtime/companion-teardown.js",
@@ -2990,6 +2995,21 @@
       "bytes": 36404
     },
     {
+      "path": "src/runtime/main-runtime-configuration-store.js",
+      "sha256": "d09e69f992e64f258b37a9589ed666751820f7e24a8e8ded694a9f4f5b3bc817",
+      "bytes": 3877
+    },
+    {
+      "path": "src/runtime/main-runtime-profile-contract.js",
+      "sha256": "811beadb50d12c7668559dce82d9e4b5ab32fcad0c49259a7a5771a1d136c1b6",
+      "bytes": 4613
+    },
+    {
+      "path": "src/runtime/main-runtime-profile-endpoint.js",
+      "sha256": "7db7d88ab1783b5abc1de376f896fec6f2122a47e95cbedb09ee60d4731a706e",
+      "bytes": 2839
+    },
+    {
       "path": "src/runtime/paid-intake-source-unit-manifest.js",
       "sha256": "abe2d77ec36409afcda82745d32eefa1941ae1e0dc17935371a548176583d1de",
       "bytes": 34694
@@ -2998,6 +3018,11 @@
       "path": "src/runtime/runtime-build-identity.js",
       "sha256": "ecbadcf13de867d71a4d70272eb9690ecd8c5d0511b03e880aa0ec349e012938",
       "bytes": 3546
+    },
+    {
+      "path": "src/runtime/runtime-operation-tracker.js",
+      "sha256": "3a636f1d3e613c9835a0490974937aea3dc46ea0480fc7a4fa93c9f03472df84",
+      "bytes": 838
     },
     {
       "path": "src/runtime/runtime-world-integrity.js",
