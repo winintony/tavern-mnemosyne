@@ -2,6 +2,10 @@ import { MnemosyneRequestError } from '../contracts/errors.js';
 import { canonicalJson, sha256 } from '../contracts/hash.js';
 import { parseMemoryScopeReference } from '../memory/memory-reference.js';
 import { OKF_ENTITY_PREFIXES } from '../okf/schema.js';
+import {
+  isCommittedBodySegmentRef,
+  resolveCommittedBodySegmentRef,
+} from './committed-body-segments.js';
 
 const SOURCE_MODES = new Set(['narration', 'dialogue', 'mixed']);
 const ENTITY_REF_PATTERN = /^okf:\/\/entity\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -12,6 +16,7 @@ const CORRECTION_FIELD_PATH_PATTERN = (
 const CORRECTION_ACTIONS = new Set([
   'replace_with_expected_enum',
   'replace_with_unique_exact_committed_body_span',
+  'use_published_committed_body_segment_ref',
   'use_trusted_canonical_ref',
 ]);
 const EVIDENCE_QUOTE_WRAPPERS = new Map([
@@ -81,7 +86,10 @@ const COMMITTED_BODY_EVIDENCE_SCHEMA = Object.freeze({
       quote_or_ref: {
         type: 'string',
         minLength: 1,
-        description: 'One unique exact quote from the committed body.',
+        description: (
+          'Prefer one ref from the current story_commit segment_directory. '
+          + 'A legacy unique exact quote from the committed body is also valid.'
+        ),
       },
       source_mode: {
         type: 'string',
@@ -752,7 +760,16 @@ function normalizeEvidenceQuote(quote, committedBody) {
   return committedBody.includes(unwrapped) ? unwrapped : quote;
 }
 
-function evidenceSpan(record, committedBody, recordIndex) {
+function evidenceSpan(
+  record,
+  committedBody,
+  recordIndex,
+  {
+    committedBodyCommitId = null,
+    committedBodyHash = null,
+    committedBodySegmentDirectory = null,
+  } = {},
+) {
   if (
     !Array.isArray(record.evidence)
     || record.evidence.length !== 1
@@ -801,10 +818,64 @@ function evidenceSpan(record, committedBody, recordIndex) {
       },
     );
   }
+  const segmentRefCandidate = (
+    evidence.quote_or_ref.startsWith(
+      'mnemosyne://committed-body-segment/',
+    )
+  );
+  if (segmentRefCandidate) {
+    let segment = null;
+    try {
+      if (isCommittedBodySegmentRef(evidence.quote_or_ref)) {
+        segment = resolveCommittedBodySegmentRef({
+          directory: committedBodySegmentDirectory,
+          body: committedBody,
+          ref: evidence.quote_or_ref,
+          commitId: committedBodyCommitId,
+          bodyHash: committedBodyHash,
+        });
+      }
+    } catch {
+      fail(
+        'turn_delta_record_invalid',
+        'The committed-body segment directory is not valid for this locked body.',
+        {
+          record_index: recordIndex,
+          field_path:
+            `records[${recordIndex}].evidence[0].quote_or_ref`,
+          action:
+            'use_published_committed_body_segment_ref',
+        },
+      );
+    }
+    if (!segment) {
+      fail(
+        'unsupported_claim',
+        'The committed-body segment ref is not published by this story commit.',
+        {
+          record_index: recordIndex,
+          field_path:
+            `records[${recordIndex}].evidence[0].quote_or_ref`,
+          action:
+            'use_published_committed_body_segment_ref',
+        },
+      );
+    }
+    return {
+      start: segment.start,
+      end: segment.end,
+      quote: segment.text,
+      source_mode: evidence.source_mode,
+      support_strength: evidence.support_strength,
+    };
+  }
   const quote = normalizeEvidenceQuote(
     evidence.quote_or_ref,
     committedBody,
   );
+  const quoteCorrectionAction = committedBodySegmentDirectory
+    ? 'use_published_committed_body_segment_ref'
+    : 'replace_with_unique_exact_committed_body_span';
   const start = committedBody.indexOf(quote);
   if (start < 0) {
     fail(
@@ -814,8 +885,7 @@ function evidenceSpan(record, committedBody, recordIndex) {
         record_index: recordIndex,
         field_path:
           `records[${recordIndex}].evidence[0].quote_or_ref`,
-        action:
-          'replace_with_unique_exact_committed_body_span',
+        action: quoteCorrectionAction,
       },
     );
   }
@@ -827,8 +897,7 @@ function evidenceSpan(record, committedBody, recordIndex) {
         record_index: recordIndex,
         field_path:
           `records[${recordIndex}].evidence[0].quote_or_ref`,
-        action:
-          'replace_with_unique_exact_committed_body_span',
+        action: quoteCorrectionAction,
       },
     );
   }
@@ -1298,6 +1367,9 @@ export function normalizeProviderTurnRecords(
     chatId,
     turnId,
     candidateId,
+    committedBodyCommitId = null,
+    committedBodyHash = null,
+    committedBodySegmentDirectory = null,
   } = {},
 ) {
   if (!Array.isArray(records)) {
@@ -1327,6 +1399,11 @@ export function normalizeProviderTurnRecords(
       operationCompatibleRecord,
       committedBody,
       recordIndex,
+      {
+        committedBodyCommitId,
+        committedBodyHash,
+        committedBodySegmentDirectory,
+      },
     );
 
     if (kind === 'current_state') {

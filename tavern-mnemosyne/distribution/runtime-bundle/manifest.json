@@ -1,18 +1,18 @@
 {
   "schema": "mnemosyne.self-contained-runtime-bundle.v1",
-  "runtime_build_id": "tavern-mnemosyne@0.3.2+runtime.47d05dee003022ac",
-  "package_version": "0.3.2",
+  "runtime_build_id": "tavern-mnemosyne@0.3.3+runtime.1676a0a2d40cc981",
+  "package_version": "0.3.3",
   "minimum_node_major": 22,
   "entrypoint": "companion-launcher.mjs",
   "archive": "runtime.tar.gz",
-  "archive_sha256": "522d17f64f035b972504c00494826c6891ff5b6a6901470ebd5edbf54b38c893",
-  "archive_bytes": 28642591,
+  "archive_sha256": "07a37927846795b68ea3adfa6186af611403035b3a67ee3dada2c2d3daa970f3",
+  "archive_bytes": 28652324,
   "release_asset": {
     "repository": "winintony/tavern-mnemosyne",
-    "tag": "v0.3.2",
-    "name": "Tavern-Mnemosyne-Runtime-v0.3.2.tar.gz"
+    "tag": "v0.3.3",
+    "name": "Tavern-Mnemosyne-Runtime-v0.3.3.tar.gz"
   },
-  "content_manifest_sha256": "47d05dee003022acd9d93ccadecaeb0b5d5f30d7c28144ba429882b85d563c74",
+  "content_manifest_sha256": "1676a0a2d40cc981ca6348eba4971faea4834b48596f752555f791ffea844853",
   "files": [
     {
       "path": "companion-launcher.mjs",
@@ -2551,12 +2551,12 @@
     },
     {
       "path": "package-lock.json",
-      "sha256": "906556931aef43dfb4f0fe0e33f47cc5e4a9e3e08f44cda008e42f4a9949fe62",
+      "sha256": "aaf18236f96706b510a6941192fd340a897dd5a1e8b68efbb6d3ce47e7be9208",
       "bytes": 1436
     },
     {
       "path": "package.json",
-      "sha256": "a8a0fa9c40205db6116019be7153dff7f673c507492ef508e612da031921dc94",
+      "sha256": "c2c191fa91a0ea79be4480728f8c313c4378eadad36c132c4ea1d650cd4ae0b3",
       "bytes": 850
     },
     {
@@ -2741,8 +2741,8 @@
     },
     {
       "path": "src/harness/run-kernel.js",
-      "sha256": "729cfef36108c3f6c78d64d6d2fd344ed7d915f252b172f27316ac82a28c0466",
-      "bytes": 66259
+      "sha256": "c485e481ad07f0f855674e58b156550b0bc6ea25aa88428f9a9363e43270935b",
+      "bytes": 67093
     },
     {
       "path": "src/harness/static-baseline-binding.js",
@@ -2770,6 +2770,11 @@
       "bytes": 8377
     },
     {
+      "path": "src/history/committed-body-segments.js",
+      "sha256": "c1107bfb78e44bf9aa974b3a8bf1c161c95ddf4d23568d874d2bb77b08aa9a33",
+      "bytes": 6087
+    },
+    {
       "path": "src/history/controlled-authority-edit.js",
       "sha256": "a6676c15532773468b3054637d09812cd115824e28e591154595ae4aba14ab35",
       "bytes": 26081
@@ -2791,8 +2796,8 @@
     },
     {
       "path": "src/history/typed-turn-delta.js",
-      "sha256": "c8cb484b530bef7f46b90157b673bb54cec955bdf3a7977e15276c7d4495bd26",
-      "bytes": 39675
+      "sha256": "73f599cff7e6077f83c6cf19c62060e9676d9e200ee2ff66975c42bb1082e33c",
+      "bytes": 41869
     },
     {
       "path": "src/host/custom-include-body.js",

@@ -15,6 +15,9 @@ import {
   PROVIDER_TYPED_RECORD_SCHEMAS,
   normalizeProviderTurnRecords,
 } from '../history/typed-turn-delta.js';
+import {
+  createCommittedBodySegmentDirectory,
+} from '../history/committed-body-segments.js';
 import { countOpenAiTokens } from '../proxy/provider-step-budget.js';
 import {
   createBoundedMemoryReadResult,
@@ -154,7 +157,8 @@ const TOOL_SCHEMAS = Object.freeze({
       name: 'memory_write_turn_delta',
       description: [
         'Settle the committed turn with grounded typed memory.',
-        'For each changed fact, cite one unique exact quote from the committed body.',
+        'For each changed fact, prefer one exact ref published by the current story_commit segment_directory.',
+        'A legacy unique exact quote from the committed body is also accepted.',
         'Record durable state, attributes, character changes, cognition boundaries,',
         'relationships, objective events, world rules, plot threads, and scene state.',
         'Use no_change only when the prose creates none of those changes, and explain why.',
@@ -1669,12 +1673,21 @@ export function createRunKernel({
             commit_id: `commit_${sha256(`${runId}:${bodyHash}`).slice(0, 24)}`,
             body: parsed.args.body,
             body_hash: bodyHash,
+            segment_directory: null,
           };
+          committed.segment_directory ??=
+            createCommittedBodySegmentDirectory({
+              commitId: committed.commit_id,
+              bodyHash: committed.body_hash,
+              body: committed.body,
+            });
           const commitResult = {
             commit_id: committed.commit_id,
             body_hash: committed.body_hash,
             byte_length: Buffer.byteLength(committed.body, 'utf8'),
             span_map_version: 1,
+            segment_directory:
+              structuredClone(committed.segment_directory),
             status: 'locked',
           };
           emitProgress('tool_finished', {
@@ -1763,6 +1776,12 @@ export function createRunKernel({
                     chatId: runScope.chat_id,
                     turnId: runScope.turn_id,
                     candidateId: runScope.candidate_id,
+                    committedBodyCommitId:
+                      committed.commit_id,
+                    committedBodyHash:
+                      committed.body_hash,
+                    committedBodySegmentDirectory:
+                      committed.segment_directory,
                   },
                 ),
               },
