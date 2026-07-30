@@ -11,6 +11,7 @@ import {
   classifyStaticLoreStructuralEvidenceSpan,
   classifyStaticLoreStructuralLineEvidenceSpan,
   classifyStaticLoreBlockTitleEvidenceSpan,
+  classifyStaticLoreIdentityValueEvidenceSpan,
   classifyStaticLoreValueReferenceEvidenceSpan,
   classifyStaticLoreSymbolRunEvidenceSpan,
   harnessStaticLoreControlBatch,
@@ -32,8 +33,8 @@ const CONTROL_CLASSIFIERS = [
   classifyStaticLoreListMarkerEvidenceSpan,
   classifyStaticLoreStructuralLineEvidenceSpan,
   classifyStaticLoreBlockTitleEvidenceSpan,
+  classifyStaticLoreIdentityValueEvidenceSpan,
   classifyStaticLoreValueReferenceEvidenceSpan,
-  classifyStaticLoreBlockTitleEvidenceSpan,
   classifyStaticLoreSymbolRunEvidenceSpan,
 ];
 const CONTROL_WARNING_REASONS = new Map([
@@ -59,6 +60,26 @@ function classifyControlSpan({
   sourceStart,
   knownConceptNames = [],
 }) {
+  const unitControl = classifyStaticLoreControlUnit(unit);
+  const sourceText = normalizedSourceText(sourceUnitText(unit));
+  if (
+    unitControl
+    && Number.isInteger(sourceStart)
+    && sourceText.slice(
+      sourceStart,
+      sourceStart + quote.length,
+    ).trim() === sourceText.trim()
+  ) {
+    return unitControl;
+  }
+  if (knownConceptNames.includes(quote.trim())) {
+    const titleControl = classifyStaticLoreUncitedTitleEvidenceSpan({
+      unit,
+      quote,
+      sourceStart,
+    });
+    if (titleControl) return titleControl;
+  }
   for (const classify of CONTROL_CLASSIFIERS) {
     const classification = classify({
       unit,
@@ -211,10 +232,7 @@ function harnessConceptCitedClaims({
         {
           claim: evidence.quote,
           claim_kind: 'fact',
-          evidence: [{
-            source_ref: evidence.source_ref,
-            quote: evidence.quote,
-          }],
+          evidence: [structuredClone(evidence)],
           source_refs: [evidence.source_ref],
         },
       ];
@@ -272,6 +290,12 @@ function harnessUnmappedExampleClaims({
       evidence: [{
         source_ref: span.source_ref,
         quote: span.quote,
+        ...(Number.isInteger(span.source_start)
+          ? {
+              source_start: span.source_start,
+              source_end: span.source_end,
+            }
+          : {}),
       }],
       source_refs: [span.source_ref],
     });

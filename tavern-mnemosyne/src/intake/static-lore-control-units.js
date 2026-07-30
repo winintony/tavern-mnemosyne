@@ -311,6 +311,38 @@ export function classifyStaticLoreValueReferenceEvidenceSpan({
   });
 }
 
+const IDENTITY_VALUE_LABEL =
+  /^(?:name|title|display[ _-]?name|名称|名字|姓名|称呼)[：:]$/iu;
+
+export function classifyStaticLoreIdentityValueEvidenceSpan({
+  unit,
+  quote,
+  sourceStart,
+} = {}) {
+  const span = typographicSpanText({ unit, quote, sourceStart });
+  if (!span || quote.includes('\n') || !quote.trim()) return null;
+  const { text } = span;
+  const lineStart = text.lastIndexOf('\n', sourceStart - 1) + 1;
+  const line = characterDescriptionEvidenceLine(text, sourceStart);
+  const valueSpan = staticLoreValueLineSpan(line);
+  if (
+    !valueSpan
+    || sourceStart < lineStart + valueSpan.start
+    || sourceStart + quote.length > lineStart + valueSpan.end
+    || !IDENTITY_VALUE_LABEL.test(
+      line.slice(0, valueSpan.start).trim(),
+    )
+  ) {
+    return null;
+  }
+  return controlClassification({
+    controlKind: 'uncited_title_span',
+    sourceKind: unit.source_kind,
+    unitId: span.unitId,
+    markerHash: rangeMarkerHash({ unit, quote, sourceStart }),
+  });
+}
+
 export function staticLoreStructuralLineKind(line) {
   return staticLoreStructuralLineSpan(line)?.kind ?? null;
 }

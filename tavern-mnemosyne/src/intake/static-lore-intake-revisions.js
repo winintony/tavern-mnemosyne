@@ -7,5 +7,5 @@
 //
 // Bump INTAKE_CONTRACT_REVISION when the extraction contract changes shape.
 // Bump SOURCE_PARTITION_REVISION when source units or batch boundaries move.
-export const INTAKE_CONTRACT_REVISION = 7;
-export const SOURCE_PARTITION_REVISION = 6;
+export const INTAKE_CONTRACT_REVISION = 8;
+export const SOURCE_PARTITION_REVISION = 7;

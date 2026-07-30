@@ -131,23 +131,47 @@ function permutedFullLineMatches(text, quote) {
   }];
 }
 
-function evidenceMatch(unit, quote) {
+function evidenceMatch(
+  unit,
+  quote,
+  sourceStart = null,
+  sourceEnd = null,
+) {
   const text = normalizedText(unitText(unit));
   const normalizedQuote = normalizedText(quote);
   if (!normalizedQuote.trim()) {
     throw new Error('Static Lore evidence quote must not be empty.');
   }
-  let offsets = matchingOffsets(text, normalizedQuote);
+  const hasServerCoordinates = (
+    Number.isInteger(sourceStart)
+    && Number.isInteger(sourceEnd)
+  );
+  if (
+    hasServerCoordinates
+    && (
+      sourceStart < 0
+      || sourceEnd <= sourceStart
+      || sourceEnd > text.length
+      || text.slice(sourceStart, sourceEnd) !== normalizedQuote
+    )
+  ) {
+    throw new TypeError(
+      `Static Lore evidence coordinates are invalid in ${unit.ref}.`,
+    );
+  }
+  let offsets = hasServerCoordinates
+    ? [sourceStart]
+    : matchingOffsets(text, normalizedQuote);
   let resolvedQuote = normalizedQuote;
   let typographicQuoteNormalized = false;
   let leadingWhitespaceNormalized = false;
   let permutedFullLinesNormalized = false;
-  if (offsets.length > 1) {
+  if (!hasServerCoordinates && offsets.length > 1) {
     throw new Error(
       `Static Lore evidence quote is ambiguous in ${unit.ref}.`,
     );
   }
-  if (offsets.length === 0) {
+  if (!hasServerCoordinates && offsets.length === 0) {
     offsets = matchingOffsets(
       normalizedTypographicQuotes(text),
       normalizedTypographicQuotes(normalizedQuote),
@@ -230,6 +254,8 @@ function evidenceMatch(unit, quote) {
   return {
     mode: [...modes][0],
     quote: resolvedQuote,
+    sourceStart: offsets[0],
+    sourceEnd: offsets[0] + resolvedQuote.length,
     typographicQuoteNormalized,
     leadingWhitespaceNormalized,
     permutedFullLinesNormalized,
@@ -271,7 +297,12 @@ function evidenceSpanIndex(extraction, units) {
     }
     let match;
     try {
-      match = evidenceMatch(unit, item.quote);
+      match = evidenceMatch(
+        unit,
+        item.quote,
+        item.source_start ?? null,
+        item.source_end ?? null,
+      );
     } catch (error) {
       throw new Error(`${label}: ${error.message}`, {
         cause: error,
@@ -281,6 +312,12 @@ function evidenceSpanIndex(extraction, units) {
       evidence: {
         source_ref: unit.ref,
         quote: match.quote,
+        ...(Number.isInteger(item.source_start)
+          ? {
+            source_start: match.sourceStart,
+            source_end: match.sourceEnd,
+          }
+          : {}),
       },
       mode: match.mode,
     });
@@ -322,6 +359,12 @@ export function resolveStaticLoreEvidenceSpans({
       evidence_id: evidenceId,
       source_ref: span.evidence.source_ref,
       quote: span.evidence.quote,
+      ...(Number.isInteger(span.evidence.source_start)
+        ? {
+          source_start: span.evidence.source_start,
+          source_end: span.evidence.source_end,
+        }
+        : {}),
       evidence_mode: span.mode,
     })),
     warnings: structuredClone(resolved.warnings),
@@ -707,4 +750,3 @@ export function normalizeStaticLoreBatchEvidence({
     warnings,
   };
 }
-

@@ -6,12 +6,11 @@ import { MnemosyneRequestError } from '../contracts/errors.js';
 import { canonicalJson, sha256 } from '../contracts/hash.js';
 import {
   createStaticLoreAggregate,
-  mergeStaticLoreBatch,
 } from '../intake/static-lore-batch.js';
-import { resolveStaticLoreEvidenceSpans } from '../intake/static-lore-evidence.js';
 import {
-  harnessStaticLoreBatchEvidence,
-} from '../intake/static-lore-evidence-harness.js';
+  atomizeStaticLoreSourceUnits,
+} from '../intake/static-lore-evidence-atoms.js';
+import { resolveStaticLoreEvidenceSpans } from '../intake/static-lore-evidence.js';
 import {
   buildStaticLoreSourceUnits,
 } from '../intake/static-lore-source-units.js';
@@ -29,8 +28,11 @@ import {
   parseStaticLoreToolArguments,
 } from '../intake/static-lore-model-response.js';
 import {
+  compileStaticLoreV7Artifact,
+  compileStaticLoreV8Patch,
+} from '../intake/static-lore-v8-compiler.js';
+import {
   rebuildStaticLoreSourceUnitLedger,
-  settleStaticLoreSourceUnits,
   staticLoreArtifactSettlementTime,
   terminalSourceUnitLedgerEntry,
 } from '../intake/static-lore-unit-settlement.js';
@@ -49,6 +51,7 @@ const MANIFEST_SCHEMA = 'mnemosyne.source-unit-coverage-manifest.v1';
 const SESSION_SCHEMA = 'mnemosyne.static-lore-intake-session.v1';
 const ARTIFACT_SCHEMA = 'mnemosyne.static-lore-model-artifact.v1';
 const EXTRACTION_SCHEMA = 'mnemosyne.static-lore-extraction.v1';
+const EXTRACTION_SCHEMA_V8 = 'mnemosyne.static-lore-extraction.v2';
 // A completed session is only interpretable by the revisions that minted it:
 // migration invalidates every superseded artifact and rebases the session onto
 // the current partition, so anything not pinned to the current revision has
@@ -104,7 +107,7 @@ function portableBatchHash(batch) {
   }))));
 }
 
-function parseExtraction(modelResponse) {
+function parseToolExtraction(modelResponse) {
   if (modelResponse?.choices?.[0]?.finish_reason === 'length') {
     integrityFailure('A paid intake artifact contains truncated output.');
   }
@@ -129,8 +132,19 @@ function parseExtraction(modelResponse) {
       { cause: error.message },
     );
   }
-  if (extraction?.schema !== EXTRACTION_SCHEMA) {
+  if (
+    extraction?.schema !== EXTRACTION_SCHEMA
+    && extraction?.schema !== EXTRACTION_SCHEMA_V8
+  ) {
     integrityFailure('A paid intake artifact has an unsupported schema.');
+  }
+  return extraction;
+}
+
+function parseExtraction(modelResponse) {
+  const extraction = parseToolExtraction(modelResponse);
+  if (extraction.schema !== EXTRACTION_SCHEMA) {
+    integrityFailure('A paid v7 intake artifact has an unsupported schema.');
   }
   return extraction;
 }
@@ -316,14 +330,30 @@ function assertSessionReady(session, {
   chatId,
   snapshot,
 }) {
+  const isCurrentV8 = (
+    Number(session?.contract_revision) >= 8
+    && session.contract_revision === REQUIRED_CONTRACT_REVISION
+    && session.partition_revision === REQUIRED_PARTITION_REVISION
+  );
+  const isConservedV7 = (
+    Number.isInteger(session?.contract_revision)
+    && session.contract_revision > 0
+    && session.contract_revision < 8
+    && Number.isInteger(session.partition_revision)
+    && session.partition_revision > 0
+    && (session.v8_round_artifacts?.length ?? 0) === 0
+    && (session.artifacts ?? []).every(artifact => (
+      artifact.contract_schema === undefined
+      || artifact.contract_schema === EXTRACTION_SCHEMA
+    ))
+  );
   if (
     session?.schema !== SESSION_SCHEMA
     || session.status !== 'completed'
     || session.chat_id !== chatId
     || session.snapshot_id !== snapshot.snapshot_id
     || session.snapshot_hash !== snapshot.snapshot_hash
-    || session.contract_revision !== REQUIRED_CONTRACT_REVISION
-    || session.partition_revision !== REQUIRED_PARTITION_REVISION
+    || (!isCurrentV8 && !isConservedV7)
     || session.next_batch_index !== session.batches?.length
     || session.artifacts?.length !== session.batches?.length
     || session.result?.status !== 'ready'
@@ -430,8 +460,18 @@ function assertArtifact({
   }
 }
 
-function evidenceKey(sourceRef, quote) {
-  return canonicalJson([sourceRef, quote]);
+function evidenceKey(
+  sourceRef,
+  quote,
+  sourceStart = null,
+  sourceEnd = null,
+) {
+  return canonicalJson([
+    sourceRef,
+    Number.isInteger(sourceStart) ? sourceStart : null,
+    Number.isInteger(sourceEnd) ? sourceEnd : null,
+    quote,
+  ]);
 }
 
 function batchEvidenceKey(batchIndex, sourceRef, evidenceId) {
@@ -444,7 +484,12 @@ function collectEvidenceKeys(record, target) {
       typeof item?.source_ref === 'string'
       && typeof item?.quote === 'string'
     ) {
-      target.add(evidenceKey(item.source_ref, item.quote));
+      target.add(evidenceKey(
+        item.source_ref,
+        item.quote,
+        item.source_start,
+        item.source_end,
+      ));
     }
   }
 }
@@ -554,6 +599,548 @@ function assertFullTextEvidence(unit, evidenceSpans) {
   return true;
 }
 
+function emptyV8Patch(snapshotHash) {
+  return {
+    schema: EXTRACTION_SCHEMA_V8,
+    snapshot_hash: snapshotHash,
+    concepts: [],
+    attribute_definitions: [],
+    progression_tracks: [],
+    current_state: [],
+    topology: [],
+    active_scene: null,
+  };
+}
+
+function collectResolvedEvidence(value, target = []) {
+  if (Array.isArray(value)) {
+    for (const item of value) collectResolvedEvidence(item, target);
+    return target;
+  }
+  if (!value || typeof value !== 'object') return target;
+  if (Array.isArray(value.evidence)) {
+    target.push(...value.evidence.map(item => structuredClone(item)));
+  }
+  for (const [key, item] of Object.entries(value)) {
+    if (key !== 'evidence') collectResolvedEvidence(item, target);
+  }
+  return target;
+}
+
+function parseV8Round(modelResponse) {
+  if (modelResponse?.choices?.[0]?.finish_reason === 'length') {
+    return {
+      patch: null,
+      reason_code: 'static_lore_intake_output_truncated',
+    };
+  }
+  const toolCalls = modelResponse?.choices?.[0]?.message?.tool_calls;
+  if (!Array.isArray(toolCalls) || toolCalls.length !== 1) {
+    return {
+      patch: null,
+      reason_code: 'static_lore_intake_tool_result_missing',
+    };
+  }
+  if (toolCalls[0]?.function?.name !== 'static_lore_return') {
+    return {
+      patch: null,
+      reason_code: 'static_lore_intake_tool_result_invalid',
+    };
+  }
+  let patch;
+  try {
+    patch = parseStaticLoreToolArguments(
+      toolCalls[0].function.arguments,
+    );
+  } catch {
+    return {
+      patch: null,
+      reason_code: 'static_lore_intake_tool_arguments_invalid',
+    };
+  }
+  if (patch?.schema !== EXTRACTION_SCHEMA_V8) {
+    return {
+      patch: null,
+      reason_code: 'static_lore_intake_contract_schema_mismatch',
+    };
+  }
+  return { patch, reason_code: null };
+}
+
+function assertV8RoundArtifact({
+  artifact,
+  record,
+  session,
+  batch,
+}) {
+  if (
+    artifact?.schema !== ARTIFACT_SCHEMA
+    || artifact.request_id !== record.request_id
+    || artifact.response_hash !== record.response_hash
+    || sha256(canonicalJson(artifact.model_response))
+      !== record.response_hash
+    || artifact.request_metadata?.chat_id !== session.chat_id
+    || artifact.request_metadata?.snapshot_id !== session.snapshot_id
+    || artifact.request_metadata?.snapshot_hash !== session.snapshot_hash
+    || artifact.request_metadata?.session_id !== session.session_id
+    || artifact.request_metadata?.batch_index !== record.batch_index
+    || artifact.request_metadata?.contract_revision
+      !== session.contract_revision
+    || artifact.request_metadata?.partition_revision
+      !== session.partition_revision
+    || Number(
+      artifact.request_metadata?.gleaning_round ?? record.round,
+    ) !== record.round
+    || canonicalJson(artifact.request_metadata?.allowed_source_refs)
+      !== canonicalJson(batch.units.map(unit => unit.ref))
+  ) {
+    integrityFailure(
+      'A paid v8 intake round no longer matches its completed session.',
+      {
+        batch_index: record.batch_index,
+        round: record.round,
+      },
+    );
+  }
+}
+
+function portableAtomKey(atom) {
+  return canonicalJson([
+    atom.source_index,
+    atom.start,
+    atom.end,
+    atom.quote_hash,
+    atom.evidence_zone,
+    atom.control,
+  ]);
+}
+
+function portableV8Patch(patch, atomIndex) {
+  const atomKeys = new Map(atomIndex.atoms.map(atom => [
+    atom.atom_id,
+    portableAtomKey(atom),
+  ]));
+  const replace = value => {
+    if (Array.isArray(value)) return value.map(replace);
+    if (!value || typeof value !== 'object') return value;
+    const output = {};
+    for (const [key, item] of Object.entries(value)) {
+      if (key === 'atom_ids') {
+        output.atom_ids = item.map(atomId => {
+          const portable = atomKeys.get(atomId);
+          if (!portable) {
+            integrityFailure(
+              'A rebased v8 artifact cites an atom outside its batch.',
+            );
+          }
+          return portable;
+        });
+      } else if (key === 'snapshot_hash') {
+        output.snapshot_hash = 'portable-source-compatible';
+      } else {
+        output[key] = replace(item);
+      }
+    }
+    return output;
+  };
+  return replace(patch);
+}
+
+async function assertV8RebaseOrigin({
+  store,
+  session,
+  batch,
+  atomIndex,
+  artifact,
+}) {
+  const rebased = artifact.request_metadata?.rebased_from;
+  if (!rebased) return;
+  if (
+    rebased.schema !== 'mnemosyne.static-lore-v8-round-rebase.v1'
+    || rebased.target_snapshot_id !== session.snapshot_id
+    || rebased.portable_batch_hash !== portableBatchHash(batch)
+    || typeof rebased.source_snapshot_id !== 'string'
+    || !rebased.source_snapshot_id
+    || typeof rebased.source_request_id !== 'string'
+    || !rebased.source_request_id
+    || !/^[a-f0-9]{64}$/u.test(rebased.source_response_hash ?? '')
+  ) {
+    integrityFailure('A rebased v8 artifact has invalid provenance.');
+  }
+  const sourceSession = await store.readIntakeSessionForAdmin({
+    chatId: session.chat_id,
+    snapshotId: rebased.source_snapshot_id,
+  });
+  const sourceRecord = sourceSession?.v8_round_artifacts?.find(
+    record => record.request_id === rebased.source_request_id,
+  );
+  const sourceBatch = sourceSession?.batches?.[
+    sourceRecord?.batch_index
+  ];
+  if (
+    sourceSession?.schema !== SESSION_SCHEMA
+    || Number(sourceSession.contract_revision) < 8
+    || !sourceRecord
+    || !sourceBatch
+    || sourceRecord.response_hash !== rebased.source_response_hash
+    || portableBatchHash(sourceBatch) !== rebased.portable_batch_hash
+  ) {
+    integrityFailure(
+      'A rebased v8 artifact has no valid persisted source round.',
+    );
+  }
+  const sourceArtifact = await store.readIntakeArtifactForAdmin({
+    chatId: session.chat_id,
+    requestId: sourceRecord.request_id,
+  });
+  if (
+    sourceArtifact?.schema !== ARTIFACT_SCHEMA
+    || sourceArtifact.request_id !== sourceRecord.request_id
+    || sourceArtifact.response_hash !== sourceRecord.response_hash
+    || sha256(canonicalJson(sourceArtifact.model_response))
+      !== sourceRecord.response_hash
+    || sourceArtifact.request_metadata?.chat_id !== session.chat_id
+    || sourceArtifact.request_metadata?.snapshot_id
+      !== sourceSession.snapshot_id
+    || sourceArtifact.request_metadata?.session_id
+      !== sourceSession.session_id
+    || sourceArtifact.request_metadata?.batch_index
+      !== sourceRecord.batch_index
+  ) {
+    integrityFailure(
+      'A rebased v8 artifact source round failed integrity validation.',
+    );
+  }
+  const sourceAtomIndex = atomizeStaticLoreSourceUnits({
+    snapshotId: sourceSession.snapshot_id,
+    snapshotHash: sourceSession.snapshot_hash,
+    sourceUnits: sourceBatch.units,
+  });
+  const sourceParsed = parseV8Round(sourceArtifact.model_response);
+  const targetParsed = parseV8Round(artifact.model_response);
+  if (
+    sourceParsed.reason_code !== targetParsed.reason_code
+    || (
+      sourceParsed.patch
+      && canonicalJson(portableV8Patch(
+        sourceParsed.patch,
+        sourceAtomIndex,
+      )) !== canonicalJson(portableV8Patch(
+        targetParsed.patch,
+        atomIndex,
+      ))
+    )
+    || (
+      !sourceParsed.patch
+      && canonicalJson(sourceArtifact.model_response)
+        !== canonicalJson(artifact.model_response)
+    )
+  ) {
+    integrityFailure(
+      'A rebased v8 artifact changed its source round semantics.',
+    );
+  }
+}
+
+async function replayV8PaidIntake({
+  store,
+  session,
+}) {
+  const progressByBatch = session.batches.map(
+    (_batch, batchIndex) => ({
+      batch_index: batchIndex,
+      next_round: 1,
+      accepted_atom_ids: [],
+      frozen_records: [],
+      terminal: false,
+    }),
+  );
+  const terminalByBatch = artifactRecordByBatch(session);
+  const ordered = [...(session.v8_round_artifacts ?? [])].sort(
+    (left, right) => (
+      left.batch_index - right.batch_index
+      || left.round - right.round
+    ),
+  );
+  if (ordered.length === 0) {
+    integrityFailure(
+      'A completed v8 intake session has no persisted compiler rounds.',
+    );
+  }
+
+  let aggregate = createStaticLoreAggregate(session.snapshot_hash);
+  const warnings = [];
+  const settledBatches = [];
+  const evidenceByCoordinate = new Map();
+  const acceptedClaimsByEvidence = new Map();
+  const acceptedNonStoryByEvidence = new Map();
+
+  const rememberEvidence = ({
+    evidence,
+    atomIndex,
+    batchIndex,
+    responseHash,
+    derived = false,
+  }) => {
+    if (
+      typeof evidence?.source_ref !== 'string'
+      || typeof evidence.quote !== 'string'
+      || !Number.isInteger(evidence.source_start)
+      || !Number.isInteger(evidence.source_end)
+    ) {
+      integrityFailure(
+        'A compiled v8 evidence coordinate is incomplete.',
+        { batch_index: batchIndex },
+      );
+    }
+    const exactAtom = atomIndex.atoms.find(candidate => (
+      candidate.source_unit_ref === evidence.source_ref
+      && candidate.start === evidence.source_start
+      && candidate.end === evidence.source_end
+      && candidate.quote_hash === sha256(evidence.quote)
+    ));
+    const coveringAtoms = derived
+      ? atomIndex.atoms.filter(candidate => (
+          candidate.source_unit_ref === evidence.source_ref
+          && candidate.start < evidence.source_end
+          && candidate.end > evidence.source_start
+        )).sort((left, right) => left.start - right.start)
+      : [];
+    const atom = exactAtom ?? coveringAtoms[0];
+    const derivedRangeCovered = (
+      derived
+      && coveringAtoms.length > 0
+      && coveringAtoms[0].start <= evidence.source_start
+      && coveringAtoms.at(-1).end >= evidence.source_end
+      && coveringAtoms.every((candidate, index) => (
+        index === 0
+        || coveringAtoms[index - 1].end === candidate.start
+      ))
+    );
+    if (!exactAtom && !derivedRangeCovered) {
+      integrityFailure(
+        'A compiled v8 evidence coordinate is outside its atom index.',
+        { batch_index: batchIndex },
+      );
+    }
+    const key = evidenceKey(
+      evidence.source_ref,
+      evidence.quote,
+      evidence.source_start,
+      evidence.source_end,
+    );
+    evidenceByCoordinate.set(key, {
+      evidence_id: derived
+        ? evidence.evidence_id
+        : atom.atom_id,
+      source_ref: evidence.source_ref,
+      quote: evidence.quote,
+      source_start: evidence.source_start,
+      source_end: evidence.source_end,
+      evidence_mode: atom.evidence_zone,
+      batch_index: batchIndex,
+      artifact_response_hash: responseHash,
+    });
+    return atom;
+  };
+
+  for (const record of ordered) {
+    const progress = progressByBatch[record.batch_index];
+    const batch = session.batches[record.batch_index];
+    if (
+      !progress
+      || !batch
+      || progress.terminal
+      || record.round !== progress.next_round
+    ) {
+      integrityFailure(
+        'The paid v8 compiler rounds are not monotone.',
+        {
+          batch_index: record.batch_index,
+          round: record.round,
+        },
+      );
+    }
+    const atomIndex = atomizeStaticLoreSourceUnits({
+      snapshotId: session.snapshot_id,
+      snapshotHash: session.snapshot_hash,
+      sourceUnits: batch.units,
+    });
+    if (
+      record.atom_index_hash !== undefined
+      && record.atom_index_hash !== null
+      && record.atom_index_hash !== atomIndex.atom_index_hash
+    ) {
+      integrityFailure(
+        'A paid v8 atom index changed after compilation.',
+        { batch_index: record.batch_index },
+      );
+    }
+    const artifact = await store.readIntakeArtifactForAdmin({
+      chatId: session.chat_id,
+      requestId: record.request_id,
+    });
+    assertV8RoundArtifact({
+      artifact,
+      record,
+      session,
+      batch,
+    });
+    await assertV8RebaseOrigin({
+      store,
+      session,
+      batch,
+      atomIndex,
+      artifact,
+    });
+    if (
+      artifact.request_metadata?.atom_index_hash
+      !== atomIndex.atom_index_hash
+    ) {
+      integrityFailure(
+        'A paid v8 artifact is bound to another atom index.',
+        { batch_index: record.batch_index },
+      );
+    }
+    const parsed = parseV8Round(artifact.model_response);
+    if (Boolean(parsed.reason_code) !== Boolean(
+      record.structurally_unusable,
+    )) {
+      integrityFailure(
+        'A paid v8 artifact changed structural meaning.',
+        {
+          batch_index: record.batch_index,
+          round: record.round,
+        },
+      );
+    }
+    const compiled = compileStaticLoreV8Patch({
+      patch: parsed.patch ?? emptyV8Patch(session.snapshot_hash),
+      sourceUnits: batch.units,
+      atomIndex,
+      aggregate,
+      acceptedAtomIds: progress.accepted_atom_ids,
+      frozenRecords: progress.frozen_records,
+      externalTickets: parsed.reason_code
+        ? [{
+            record: 'response',
+            reason_code: parsed.reason_code,
+          }]
+        : [],
+      round: record.round,
+      maxRounds: session.max_gleaning_rounds,
+    });
+    if (compiled.ledger_hash !== record.ledger_hash) {
+      integrityFailure(
+        'A paid v8 compiler ledger drifted from its persisted artifact.',
+        {
+          batch_index: record.batch_index,
+          round: record.round,
+        },
+      );
+    }
+    const batchMappings = collectBatchMappings(
+      compiled.accepted_delta,
+    );
+    for (const [key, mappings] of batchMappings) {
+      const existing = acceptedClaimsByEvidence.get(key) ?? new Map();
+      for (const [mappingKey, mapping] of mappings) {
+        existing.set(mappingKey, mapping);
+      }
+      acceptedClaimsByEvidence.set(key, existing);
+    }
+    for (const evidence of collectResolvedEvidence(
+      compiled.accepted_delta,
+    )) {
+      rememberEvidence({
+        evidence,
+        atomIndex,
+        batchIndex: record.batch_index,
+        responseHash: artifact.response_hash,
+      });
+    }
+    for (const evidence of (
+      compiled.accepted_non_story_evidence ?? []
+    )) {
+      rememberEvidence({
+        evidence,
+        atomIndex,
+        batchIndex: record.batch_index,
+        responseHash: artifact.response_hash,
+        derived: true,
+      });
+      acceptedNonStoryByEvidence.set(
+        batchEvidenceKey(
+          record.batch_index,
+          evidence.source_ref,
+          evidence.evidence_id,
+        ),
+        structuredClone(evidence.classification),
+      );
+    }
+
+    aggregate = compiled.aggregate;
+    warnings.push(...compiled.warnings);
+    progress.accepted_atom_ids = compiled.accepted_atom_ids;
+    progress.frozen_records = compiled.frozen_records;
+    if (compiled.round_terminal) {
+      progress.terminal = true;
+      const terminal = terminalByBatch.get(record.batch_index);
+      if (
+        terminal?.request_id !== record.request_id
+        || terminal.response_hash !== record.response_hash
+        || terminal.ledger_hash !== record.ledger_hash
+        || terminal.contract_schema !== EXTRACTION_SCHEMA_V8
+      ) {
+        integrityFailure(
+          'A paid v8 terminal artifact is not the terminal compiler round.',
+          { batch_index: record.batch_index },
+        );
+      }
+      settledBatches.push({
+        batch_index: record.batch_index,
+        settlements: compiled.settlements.map(entry => ({
+          source_unit_ref: entry.source_unit_ref,
+          state: entry.state,
+          accepted_evidence_count: entry.accepted_evidence_count,
+          uncovered_non_whitespace_count:
+            entry.uncovered_non_whitespace_count,
+          rejected_records: entry.rejected_records,
+        })),
+        settled_at: terminal.committed_at,
+      });
+    } else {
+      progress.next_round += 1;
+    }
+  }
+
+  if (
+    progressByBatch.filter(progress => progress.terminal).length
+      !== session.batches.length
+    || canonicalJson(aggregate) !== canonicalJson(session.aggregate)
+    || canonicalJson(warnings) !== canonicalJson(session.merge_warnings)
+  ) {
+    integrityFailure(
+      'The paid v8 artifacts no longer rebuild the completed intake.',
+    );
+  }
+  const sourceUnitLedger = validatedSourceUnitLedger(
+    session,
+    rebuildStaticLoreSourceUnitLedger({
+      batches: session.batches,
+      settledBatches,
+    }),
+  );
+  return {
+    aggregate,
+    warnings,
+    evidence_spans: [...evidenceByCoordinate.values()],
+    accepted_claims_by_evidence: acceptedClaimsByEvidence,
+    accepted_non_story_by_evidence: acceptedNonStoryByEvidence,
+    source_unit_ledger: sourceUnitLedger,
+  };
+}
+
 async function loadTrustedSnapshot({
   store,
   chatId,
@@ -653,11 +1240,26 @@ export function createPaidIntakeSourceUnitManifestProvider({
 
     const artifactRecords = artifactRecordByBatch(session);
     let aggregate = createStaticLoreAggregate(session.snapshot_hash);
-    const warnings = [];
-    const evidenceSpans = [];
-    const acceptedClaimsByEvidence = new Map();
-    const acceptedNonStoryByEvidence = new Map();
+    let warnings = [];
+    let evidenceSpans = [];
+    let acceptedClaimsByEvidence = new Map();
+    let acceptedNonStoryByEvidence = new Map();
+    let sourceUnitLedger;
     const settledBatches = [];
+    if (session.contract_revision >= 8) {
+      const replayed = await replayV8PaidIntake({
+        store,
+        session,
+      });
+      aggregate = replayed.aggregate;
+      warnings = replayed.warnings;
+      evidenceSpans = replayed.evidence_spans;
+      acceptedClaimsByEvidence =
+        replayed.accepted_claims_by_evidence;
+      acceptedNonStoryByEvidence =
+        replayed.accepted_non_story_by_evidence;
+      sourceUnitLedger = replayed.source_unit_ledger;
+    } else {
     for (
       let batchIndex = 0;
       batchIndex < session.batches.length;
@@ -693,34 +1295,26 @@ export function createPaidIntakeSourceUnitManifestProvider({
         session,
         batch,
       });
-      let normalized;
-      let resolved;
+      let compiled;
       try {
-        resolved = resolveStaticLoreEvidenceSpans({
+        compiled = compileStaticLoreV7Artifact({
           extraction,
           sourceUnits: batch.units,
-        });
-        normalized = harnessStaticLoreBatchEvidence({
-          extraction,
-          sourceUnits: batch.units,
-          existingConceptKeys: aggregate.concepts.map(
-            concept => concept.concept_key,
-          ),
-          existingConcepts: aggregate.concepts,
+          aggregate,
         });
       } catch (error) {
         integrityFailure(
-          'A paid intake artifact no longer passes evidence validation.',
+          'A paid v7 intake artifact no longer passes compiler validation.',
           { batch_index: batchIndex, cause: error.message },
         );
       }
-      const settled = settleStaticLoreSourceUnits({
+      const resolved = resolveStaticLoreEvidenceSpans({
         extraction,
-        normalizedExtraction: normalized.extraction,
         sourceUnits: batch.units,
-        nonStoryEvidence: normalized.non_story_evidence,
       });
-      const batchMappings = collectBatchMappings(settled.extraction);
+      const batchMappings = collectBatchMappings(
+        compiled.accepted_delta,
+      );
       for (const [key, mappings] of batchMappings) {
         const existing = acceptedClaimsByEvidence.get(key) ?? new Map();
         for (const [mappingKey, mapping] of mappings) {
@@ -728,7 +1322,9 @@ export function createPaidIntakeSourceUnitManifestProvider({
         }
         acceptedClaimsByEvidence.set(key, existing);
       }
-      for (const evidence of normalized.non_story_evidence) {
+      for (const evidence of (
+        compiled.accepted_non_story_evidence ?? []
+      )) {
         const key = batchEvidenceKey(
           batchIndex,
           evidence.source_ref,
@@ -748,13 +1344,27 @@ export function createPaidIntakeSourceUnitManifestProvider({
         }
         acceptedNonStoryByEvidence.set(key, evidence.classification);
       }
-      const acceptedSpanIds = new Set(
-        settled.accepted_evidence_span_ids,
+      const acceptedEvidenceKeys = new Set(
+        collectResolvedEvidence(compiled.accepted_delta).map(
+          evidence => evidenceKey(
+            evidence.source_ref,
+            evidence.quote,
+            evidence.source_start,
+            evidence.source_end,
+          ),
+        ),
       );
       for (const span of resolved.spans.filter(
-        item => acceptedSpanIds.has(item.evidence_id),
+        item => acceptedEvidenceKeys.has(evidenceKey(
+          item.source_ref,
+          item.quote,
+          item.source_start,
+          item.source_end,
+        )),
       )) {
-        const localControl = normalized.non_story_evidence.find(
+        const localControl = (
+          compiled.accepted_non_story_evidence ?? []
+        ).find(
           evidence => (
             evidence.evidence_id === span.evidence_id
             && evidence.source_ref === span.source_ref
@@ -772,10 +1382,10 @@ export function createPaidIntakeSourceUnitManifestProvider({
           artifact_response_hash: artifact.response_hash,
         });
       }
-      for (const evidence of normalized.non_story_evidence.filter(
-        item => item.synthesized,
-      )) {
-        evidenceSpans.push({
+      for (const evidence of (
+        compiled.accepted_non_story_evidence ?? []
+      ).filter(item => item.synthesized)) {
+        const candidate = {
           evidence_id: evidence.evidence_id,
           source_ref: evidence.source_ref,
           quote: evidence.quote,
@@ -784,22 +1394,21 @@ export function createPaidIntakeSourceUnitManifestProvider({
           source_end: evidence.source_end,
           batch_index: batchIndex,
           artifact_response_hash: artifact.response_hash,
-        });
+        };
+        if (!evidenceSpans.some(existing => (
+          existing.batch_index === batchIndex
+          && existing.source_ref === candidate.source_ref
+          && existing.source_start === candidate.source_start
+          && existing.source_end === candidate.source_end
+        ))) {
+          evidenceSpans.push(candidate);
+        }
       }
-      const merged = mergeStaticLoreBatch({
-        aggregate,
-        extraction: settled.extraction,
-        allowedSourceRefs: batch.units.map(unit => unit.ref),
-      });
-      aggregate = merged.aggregate;
-      warnings.push(
-        ...normalized.warnings,
-        ...settled.warnings,
-        ...merged.warnings,
-      );
+      aggregate = compiled.aggregate;
+      warnings.push(...compiled.warnings);
       settledBatches.push({
         batch_index: batchIndex,
-        settlements: settled.settlements,
+        settlements: compiled.settlements,
         settled_at: staticLoreArtifactSettlementTime(session, record),
       });
     }
@@ -811,13 +1420,14 @@ export function createPaidIntakeSourceUnitManifestProvider({
         'The paid artifacts no longer rebuild the completed intake aggregate.',
       );
     }
-    const sourceUnitLedger = validatedSourceUnitLedger(
+    sourceUnitLedger = validatedSourceUnitLedger(
       session,
       rebuildStaticLoreSourceUnitLedger({
         batches: session.batches,
         settledBatches,
       }),
     );
+    }
 
     const opened = await store.openChatForAdmin({
       chatId: request.chat_id,
@@ -895,7 +1505,12 @@ export function createPaidIntakeSourceUnitManifestProvider({
     );
     const requiredEvidenceSpans = [];
     for (const span of unitEvidence) {
-      const key = evidenceKey(span.source_ref, span.quote);
+      const key = evidenceKey(
+        span.source_ref,
+        span.quote,
+        span.source_start,
+        span.source_end,
+      );
       const claimMappings = [
         ...(acceptedClaimsByEvidence.get(key)?.values() ?? []),
       ].sort((left, right) => (

@@ -1,18 +1,18 @@
 {
   "schema": "mnemosyne.self-contained-runtime-bundle.v1",
-  "runtime_build_id": "tavern-mnemosyne@0.2.11+runtime.d8f78a87177255e8",
-  "package_version": "0.2.11",
+  "runtime_build_id": "tavern-mnemosyne@0.3.0+runtime.a922422c86565024",
+  "package_version": "0.3.0",
   "minimum_node_major": 22,
   "entrypoint": "companion-launcher.mjs",
   "archive": "runtime.tar.gz",
-  "archive_sha256": "74c0361c7cc14184641631c1142bbe0aa3cbd9f2c9a45ac777ce00c44168a3ca",
-  "archive_bytes": 28540176,
+  "archive_sha256": "f4a0fe61e51c396c0a966627969ebdf3b32afbf3bb300e3e0625b55f3f5f8d53",
+  "archive_bytes": 28641567,
   "release_asset": {
     "repository": "winintony/tavern-mnemosyne",
-    "tag": "v0.2.11",
-    "name": "Tavern-Mnemosyne-Runtime-v0.2.11.tar.gz"
+    "tag": "v0.3.0",
+    "name": "Tavern-Mnemosyne-Runtime-v0.3.0.tar.gz"
   },
-  "content_manifest_sha256": "d8f78a87177255e82af375a0f414a65ba07de62259a062234246b1323ba1748f",
+  "content_manifest_sha256": "a922422c8656502413fd87a6f474de8bd5f6b6656f0063eb673205af1dd3cf1d",
   "files": [
     {
       "path": "companion-launcher.mjs",
@@ -2551,13 +2551,13 @@
     },
     {
       "path": "package-lock.json",
-      "sha256": "ab366da1b96a83a73cb765fbd9df67414131038141716c24167fd5edf240d815",
-      "bytes": 1438
+      "sha256": "bafd15370c3d1dbbb75d681346cf1c23b8c89b4b1a8f40549167901cdbb22ee3",
+      "bytes": 1436
     },
     {
       "path": "package.json",
-      "sha256": "283b4b3a3b89c55a48738193b1062f74c31a2ede4b088737f3aee731479843e3",
-      "bytes": 851
+      "sha256": "a158f87ffa232324c4861d2e9335f55e0edf1cb33770098060b58a4c058beddd",
+      "bytes": 850
     },
     {
       "path": "src/contracts/accepted-baseline-claim.js",
@@ -2841,13 +2841,18 @@
     },
     {
       "path": "src/intake/static-lore-control-units.js",
-      "sha256": "950fb4ebd473016745265395bca9b6beecfefcbe3f1b7bf7634b628dd4e8754f",
-      "bytes": 24006
+      "sha256": "8e62810299e250150ed8732f3c2ee7498eabb1b599a2848e6c48af144512a608",
+      "bytes": 25007
+    },
+    {
+      "path": "src/intake/static-lore-evidence-atoms.js",
+      "sha256": "c442bfd5773b9e306ff7c1a35153f50f7c9576d07657de4c288e5e9a1427e671",
+      "bytes": 8401
     },
     {
       "path": "src/intake/static-lore-evidence-harness.js",
-      "sha256": "a9254b3b5435ed587d6e7cede036a38a114c6bc2bb9b62a46994c40a0cb1d54c",
-      "bytes": 18863
+      "sha256": "2ca6b75d600e7605128e1f8b0163a8cb450205e8a0f568b40a308473a3248b7d",
+      "bytes": 19578
     },
     {
       "path": "src/intake/static-lore-evidence-zones.js",
@@ -2856,17 +2861,17 @@
     },
     {
       "path": "src/intake/static-lore-evidence.js",
-      "sha256": "b6ba05ad4e528a3f0e5ae0a921fcdbc2152153f09f851810607624b4ac9d4932",
-      "bytes": 20627
+      "sha256": "53f93b11cf9cfb6a06bef08540a20287fab9405ee1393226d3bc08509a57bcec",
+      "bytes": 21732
     },
     {
       "path": "src/intake/static-lore-extraction-service.js",
-      "sha256": "8eb7649008bdbfd8c7a41c0abc46790194a25f0480a1b48cf693c427a53e3747",
-      "bytes": 132867
+      "sha256": "8748d403a71e6e5c1b882532658b58f28a65fdc74aa36907e1b49efd2c78d471",
+      "bytes": 171465
     },
     {
       "path": "src/intake/static-lore-intake-revisions.js",
-      "sha256": "69cb120ceb0826c94f541e2d6f50bbe7c827bdb1e274844a4a7126f1aad05f78",
+      "sha256": "abcb3fb2e4e9aa1cc240d56f27f38b00462a240d304568218cc936cfbe65c92c",
       "bytes": 612
     },
     {
@@ -2893,6 +2898,11 @@
       "path": "src/intake/static-lore-unit-settlement.js",
       "sha256": "2671b8587e7bffb88631d5d71ad86a75976f4db11c91931628c4fa44cb1a2db4",
       "bytes": 11773
+    },
+    {
+      "path": "src/intake/static-lore-v8-compiler.js",
+      "sha256": "b9242d71f8f8549885872da80e4160358057587db14ba0917227847dc958f656",
+      "bytes": 31693
     },
     {
       "path": "src/memory/bounded-memory-read.js",
@@ -3011,8 +3021,8 @@
     },
     {
       "path": "src/runtime/paid-intake-source-unit-manifest.js",
-      "sha256": "abe2d77ec36409afcda82745d32eefa1941ae1e0dc17935371a548176583d1de",
-      "bytes": 34694
+      "sha256": "142930ea5a4d699f6fe39d9664a847dee095b236284e6dd75b23d16877345535",
+      "bytes": 52981
     },
     {
       "path": "src/runtime/runtime-build-identity.js",
