@@ -1,7 +1,9 @@
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -27,7 +29,6 @@ export const COMPANION_REMOVAL_SENTINEL =
   'plugins/tavern-mnemosyne/uninstall-pending.json';
 export const COMPANION_EXTENSION_CODE_ROOTS = Object.freeze([
   'data/default-user/extensions/tavern-mnemosyne',
-  'public/scripts/extensions/third-party/tavern-mnemosyne',
 ]);
 
 const SENTINEL_SCHEMA = 'mnemosyne.companion-uninstall-pending.v1';
@@ -47,9 +48,25 @@ export function companionExtensionInstalled({
   rootDir,
   codeRoots = COMPANION_EXTENSION_CODE_ROOTS,
 }) {
-  return codeRoots.some(relativePath => existsSync(
-    resolveWithin(rootDir, relativePath),
-  ));
+  const resolvedRoot = realpathSync(rootDir);
+  return codeRoots.some(relativePath => {
+    const codeRoot = resolveWithin(rootDir, relativePath);
+    const expectedRoot = path.join(resolvedRoot, relativePath);
+    const manifestPath = path.join(codeRoot, 'manifest.json');
+    try {
+      const codeMetadata = lstatSync(codeRoot);
+      const manifestMetadata = lstatSync(manifestPath);
+      return (
+        codeMetadata.isDirectory()
+        && !codeMetadata.isSymbolicLink()
+        && realpathSync(codeRoot) === expectedRoot
+        && manifestMetadata.isFile()
+        && !manifestMetadata.isSymbolicLink()
+      );
+    } catch {
+      return false;
+    }
+  });
 }
 
 export async function runCompanionTeardown({

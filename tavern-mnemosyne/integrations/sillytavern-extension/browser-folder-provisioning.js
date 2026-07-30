@@ -19,11 +19,6 @@ export const BROWSER_FOLDER_PATHS = Object.freeze({
     installRoot: 'data/_mnemosyne/install',
 });
 
-export const BROWSER_FOLDER_CODE_ROOTS = Object.freeze([
-    BROWSER_FOLDER_PATHS.codeRoot,
-    'public/scripts/extensions/third-party/tavern-mnemosyne',
-]);
-
 const SAFE_BUILD_ID = /^[A-Za-z0-9@._+-]{1,160}$/;
 const MANIFEST_SCHEMA =
     'mnemosyne.self-contained-runtime-bundle.v1';
@@ -175,45 +170,18 @@ function codeLayout(codeRoot) {
     });
 }
 
-async function discoverUserExtensionRoots(rootHandle) {
-    const roots = [];
-    let dataDirectory;
-    try {
-        dataDirectory = await rootHandle.getDirectoryHandle('data');
-    } catch (error) {
-        if (error?.name === 'NotFoundError') return roots;
-        throw error;
-    }
-    if (typeof dataDirectory.values !== 'function') return roots;
-    for await (const entry of dataDirectory.values()) {
-        if (
-            entry?.kind === 'directory'
-            && typeof entry.name === 'string'
-            && entry.name
-        ) {
-            roots.push(`data/${entry.name}/extensions/tavern-mnemosyne`);
-        }
-    }
-    return roots;
-}
-
 async function resolveInstalledCodeLayout(rootHandle) {
-    const candidates = [
-        ...BROWSER_FOLDER_CODE_ROOTS,
-        ...await discoverUserExtensionRoots(rootHandle),
-    ];
-    for (const codeRoot of new Set(candidates)) {
-        const layout = codeLayout(codeRoot);
-        try {
-            await readFileBytes(rootHandle, layout.codeManifest);
-            return layout;
-        } catch (error) {
-            if (error?.name !== 'NotFoundError') throw error;
-        }
+    const layout = codeLayout(BROWSER_FOLDER_PATHS.codeRoot);
+    try {
+        await readFileBytes(rootHandle, layout.codeManifest);
+        return layout;
+    } catch (error) {
+        if (error?.name !== 'NotFoundError') throw error;
     }
     throw provisioningError(
         'browser_folder_extension_install_not_found',
-        'The selected SillyTavern folder does not contain this installed extension.',
+        'The selected SillyTavern folder does not contain the exact '
+        + 'data/default-user Mnemosyne Extension clone.',
     );
 }
 

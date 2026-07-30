@@ -1,18 +1,18 @@
 {
   "schema": "mnemosyne.self-contained-runtime-bundle.v1",
-  "runtime_build_id": "tavern-mnemosyne@0.3.0+runtime.a922422c86565024",
-  "package_version": "0.3.0",
+  "runtime_build_id": "tavern-mnemosyne@0.3.1+runtime.8eaadd11cb4a966b",
+  "package_version": "0.3.1",
   "minimum_node_major": 22,
   "entrypoint": "companion-launcher.mjs",
   "archive": "runtime.tar.gz",
-  "archive_sha256": "f4a0fe61e51c396c0a966627969ebdf3b32afbf3bb300e3e0625b55f3f5f8d53",
-  "archive_bytes": 28641567,
+  "archive_sha256": "e3f7cc4428097048657301c30fb79b7783d1715160f8c39d28a294e8daab6904",
+  "archive_bytes": 28642079,
   "release_asset": {
     "repository": "winintony/tavern-mnemosyne",
-    "tag": "v0.3.0",
-    "name": "Tavern-Mnemosyne-Runtime-v0.3.0.tar.gz"
+    "tag": "v0.3.1",
+    "name": "Tavern-Mnemosyne-Runtime-v0.3.1.tar.gz"
   },
-  "content_manifest_sha256": "a922422c8656502413fd87a6f474de8bd5f6b6656f0063eb673205af1dd3cf1d",
+  "content_manifest_sha256": "8eaadd11cb4a966b79346dc2395372c527d8ce63feb4c1bbf86e8de9bf3ac4e4",
   "files": [
     {
       "path": "companion-launcher.mjs",
@@ -2551,12 +2551,12 @@
     },
     {
       "path": "package-lock.json",
-      "sha256": "bafd15370c3d1dbbb75d681346cf1c23b8c89b4b1a8f40549167901cdbb22ee3",
+      "sha256": "f41a6c83db517288db27bb201ccb0446f940b9790c53de41ab91f585786cd4a1",
       "bytes": 1436
     },
     {
       "path": "package.json",
-      "sha256": "a158f87ffa232324c4861d2e9335f55e0edf1cb33770098060b58a4c058beddd",
+      "sha256": "c573012547b34b93341ea912e8c6a83ba0de5e3ffb0607e92ece652b3eb2d7f4",
       "bytes": 850
     },
     {
@@ -2986,8 +2986,8 @@
     },
     {
       "path": "src/runtime/companion-teardown.js",
-      "sha256": "9a16a04c429259722aa96bb658c35643ea6a028620a8e9d8046f924cf60f04e9",
-      "bytes": 4316
+      "sha256": "172e670e744cd21bcd245f51bebb5de46af80e8f9d72fa713bb87ad0a57157e3",
+      "bytes": 4854
     },
     {
       "path": "src/runtime/context-provider.js",

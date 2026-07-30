@@ -17,13 +17,8 @@ const BINDING_SCHEMA = 'mnemosyne.bootstrap-binding.v1';
 const ownDirectory = path.dirname(fileURLToPath(import.meta.url));
 const sillyTavernRoot = path.resolve(ownDirectory, '..', '..');
 const dataRoot = path.join(sillyTavernRoot, 'data');
-const publicExtensionRoot = path.join(
-  sillyTavernRoot,
-  'public',
-  'scripts',
-  'extensions',
-  'third-party',
-);
+const EXPECTED_CODE_ROOT_RELATIVE =
+  'data/default-user/extensions/tavern-mnemosyne';
 const bindingPath = path.join(ownDirectory, 'binding.json');
 const RELEASE_REPOSITORY = 'winintony/tavern-mnemosyne';
 const MAX_RUNTIME_ARCHIVE_BYTES = 128 * 1024 * 1024;
@@ -440,17 +435,33 @@ async function resolveBinding() {
     );
   }
   assertRelativePath(binding.relative_code_root);
-  const allowedCodeRoots = [
-    dataRoot,
-    publicExtensionRoot,
-  ].filter(existsSync).map(root => realpathSync(root));
+  if (binding.relative_code_root !== EXPECTED_CODE_ROOT_RELATIVE) {
+    fail(
+      'MNEMOSYNE_BOOTSTRAP_CODE_ROOT_MISMATCH',
+      'The Mnemosyne binding does not name the exact supported '
+        + 'data/default-user Extension clone.',
+    );
+  }
+  const resolvedDataRoot = realpathSync(dataRoot);
+  const expectedCodeRoot = path.join(
+    resolvedDataRoot,
+    'default-user',
+    'extensions',
+    'tavern-mnemosyne',
+  );
   const codeRoot = realpathSync(
     path.resolve(sillyTavernRoot, binding.relative_code_root),
   );
-  if (!allowedCodeRoots.some(root => inside(root, codeRoot))) {
+  if (codeRoot !== expectedCodeRoot) {
+    fail(
+      'MNEMOSYNE_BOOTSTRAP_CODE_ROOT_MISMATCH',
+      'The exact Mnemosyne Extension path resolves to another code root.',
+    );
+  }
+  if (!inside(resolvedDataRoot, codeRoot)) {
     fail(
       'MNEMOSYNE_BOOTSTRAP_CODE_ROOT_ESCAPE',
-      'The bound Mnemosyne code root is outside an allowed extension root.',
+      'The bound Mnemosyne code root is outside the SillyTavern data root.',
     );
   }
   const rootManifest = readJson(

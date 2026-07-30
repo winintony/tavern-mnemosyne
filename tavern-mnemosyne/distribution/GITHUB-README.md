@@ -100,9 +100,25 @@ that download, but no Tavern Mnemosyne story or credential data.
 
 ## Updates
 
-- Local BrowserFolder installations use SillyTavern's extension updater; press
-  **启用 Mnemosyne** again only when the UI reports that the sealed runtime
-  needs rebinding.
+- Local BrowserFolder installations with one user-clone authority use
+  SillyTavern's extension updater; press **启用 Mnemosyne** again only when
+  the UI reports that the sealed runtime needs rebinding.
+- A host carried forward from an old manual or development install may still
+  contain
+  `public/scripts/extensions/third-party/tavern-mnemosyne`. SillyTavern serves
+  that global path before the updated user clone, so the shadowed new
+  extension cannot remove it from inside the page. After updating the user
+  clone, run the release's one-time host migration from the SillyTavern root:
+
+  ```text
+  node data/default-user/extensions/tavern-mnemosyne/tavern-mnemosyne/distribution/migrate-code-authority.mjs --sillytavern-root .
+  ```
+
+  The migration works on macOS, Windows, and Linux, moves the old mirror to
+  `data/_mnemosyne/install/legacy-public-mirror-backups/`, and records a
+  receipt; it does not delete the old bytes. The macOS advanced recovery
+  installer performs the same migration automatically. Restart SillyTavern
+  afterward, then press **启用 Mnemosyne** once to rebind the runtime.
 - Cloud deployments update the two published images by semantic version and
   digest.
 - Advanced standalone packages must carry the same semantic version as the
