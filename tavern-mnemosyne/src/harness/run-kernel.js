@@ -306,6 +306,7 @@ function toolErrorMessage(callId, name, error) {
   const canonicalNames = {
     memory_search: 'memory.search',
     memory_read: 'memory.read',
+    story_commit: 'story.commit',
     memory_write_turn_delta: 'memory.write_turn_delta',
   };
   return {
@@ -1228,10 +1229,9 @@ export function createRunKernel({
         } catch (error) {
           const protocolCalls =
             response?.assistant_message?.tool_calls;
-          const correctableProtocolError = (
-            error?.reasonCode === 'main_ai_tool_protocol_invalid'
-            && Array.isArray(protocolCalls)
-            && protocolCalls.length > 1
+          const completeNativeCalls = (
+            Array.isArray(protocolCalls)
+            && protocolCalls.length > 0
             && protocolCalls.every(call => (
               typeof call?.id === 'string'
               && call.id
@@ -1239,6 +1239,19 @@ export function createRunKernel({
               && call.function.name
               && typeof call?.function?.arguments === 'string'
             ))
+          );
+          const correctableProtocolError = (
+            completeNativeCalls
+            && (
+              (
+                error?.reasonCode === 'main_ai_tool_arguments_invalid'
+                && protocolCalls.length === 1
+              )
+              || (
+                error?.reasonCode === 'main_ai_tool_protocol_invalid'
+                && protocolCalls.length > 1
+              )
+            )
           );
           if (!correctableProtocolError) {
             emitProgress('tool_failed', {
